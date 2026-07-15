@@ -1,0 +1,14 @@
+# Python virtualenv — has absolute paths baked in, not portable. Recreate with:
+#   python3 -m venv .venv && .venv/bin/pip install iterm2
+.venv/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime state / logs (live under ~/.itermux, but ignore any stray local copies)
+*.log
+state.json
+
+.DS_Store
