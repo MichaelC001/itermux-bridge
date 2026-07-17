@@ -124,6 +124,17 @@ class ITermBackend:
         the wheel should page through history — the same split iTerm2 and tmux
         make.
         """
+        # We only OWN the mouse when the user turned it on (Ctrl-B m). With mouse
+        # off — the default — we never requested reporting, so any mouse bytes
+        # that arrive are the CLIENT terminal's own state leaking through (some
+        # other program left ?1000h on). Treating those as a selection dragged us
+        # into copy-mode on a stray click and wouldn't let go. Hand them to the
+        # app instead, exactly as a bare tmux with `mouse off` does.
+        if not peer.mouse_on:
+            for ev in events:
+                await self._send_raw(session, ev.encode())
+            return
+
         try:
             mode = await session.async_get_variable("mouseReportingMode")
         except Exception:
@@ -155,12 +166,17 @@ class ITermBackend:
 
         if ev.pressed and not (ev.cb & mouse.MOTION_BIT):
             # Button down: start a fresh selection here, confined to the pane
-            # that was clicked (not necessarily the active one).
+            # that was clicked (not necessarily the active one). Only *enter*
+            # copy-mode if we're not already in it — re-entering would reset
+            # bounds/pending state mid-session.
             if peer.tty is None:
                 return
             cols, rows = peer.tty.size()
             bounds = self._bounds_at(peer, session, cols, rows, y, x)
-            cm.enter(rows, peer.scroll_offset, bounds=bounds)
+            if not cm.active:
+                cm.enter(rows, peer.scroll_offset, bounds=bounds)
+            else:
+                cm.bounds = bounds
             cm.cy, cm.cx = y, x
             cm.clamp()
             cm.start_selection()
@@ -236,9 +252,50 @@ class ITermBackend:
         cols, rows = peer.tty.size()
         cm = peer.copy
 
+        # An arrow key is ESC [ A — three bytes that can arrive split across
+        # reads. Treating a bare ESC as "quit" the instant it lands means a split
+        # arrow key kicks you out of copy-mode (and its trailing "[A" leaks to
+        # the app). So we stash an INCOMPLETE escape tail and resume it next
+        # time. This is the intermittent "accidentally left copy-mode" you saw.
+        #
+        # But a stashed ESC that ISN'T continued by [ or O was a real Escape
+        # (the user quitting): flush it as such instead of swallowing it.
+        if cm.pending == b"\x1b" and data[:1] not in (b"[", b"O"):
+            cm.leave()
+            peer.scroll_offset = 0
+            cm.pending = bytearray()
+            # `data` here is the *next* key; fall through and process it too, but
+            # copy-mode is now off, so hand it back to the app.
+            if data:
+                self.on_input(peer, data)
+            await self._paint(peer, session)
+            return
+
+        data = bytes(cm.pending) + data
+        cm.pending = bytearray()
+
         i = 0
         while i < len(data):
             b = data[i:i + 1]
+
+            # An incomplete escape tail (ESC, ESC-[, ESC-O, ESC-[-5/6) at the END
+            # of this chunk: stash it and wait for the rest rather than misreading
+            # the ESC as quit.
+            rest = data[i:]
+            if rest == b"\x1b" or rest in (b"\x1b[", b"\x1bO") or \
+                    (rest[:2] == b"\x1b[" and rest[2:3] in (b"5", b"6")
+                     and len(rest) < 4):
+                cm.pending = bytearray(rest)
+                # A lone ESC might be a real Escape (quit) OR the start of a
+                # split arrow key. Disambiguate the way terminals do — with a
+                # short timeout: if nothing continues it, it was Escape.
+                if rest == b"\x1b":
+                    self.loop.create_task(self._esc_timeout(peer))
+                # Stashing changed nothing on screen, so DON'T repaint here.
+                # Repainting would emit a fresh copy-mode frame that then races
+                # (and loses to) the timeout's leave-repaint, leaving the COPY
+                # status bar stuck on screen.
+                return
 
             # Arrows arrive as ESC [ A etc.
             if data[i:i + 3] in (b"\x1b[A", b"\x1bOA"):
@@ -315,6 +372,23 @@ class ITermBackend:
             peer.scroll_offset -= 1
             return
         cm.move(dy, 0, rows, cols)
+
+    async def _esc_timeout(self, peer) -> None:
+        """Resolve a stashed lone ESC as a real Escape if nothing continues it.
+
+        A split arrow key's "[A" tail arrives within a couple ms; a user pressing
+        Escape to quit never does. So wait briefly: if the ESC is still pending
+        and still lone, it was Escape — leave copy-mode.
+        """
+        await asyncio.sleep(0.05)
+        cm = peer.copy
+        if cm.active and cm.pending == b"\x1b":
+            cm.pending = bytearray()
+            cm.leave()
+            peer.scroll_offset = 0
+            session = self._session_of(peer)
+            if session is not None:
+                await self._paint(peer, session)
 
     def _page(self, peer, rows: int, direction: int, full: bool = False) -> None:
         """Scroll the view. direction: -1 = back in history, +1 = towards live."""
@@ -456,10 +530,15 @@ class ITermBackend:
                 # hands it to us: the wheel pages through scrollback and a TUI
                 # gets its clicks — at the cost of the terminal's own selection.
                 peer.mouse_on = not peer.mouse_on
+                # Leave copy-mode whenever mouse ownership changes. Mouse-driven
+                # selection put us there; once the mouse is no longer ours (or
+                # its ownership just flipped) there's no way to drive or exit the
+                # selection with it, so a leftover copy-mode would trap the
+                # keyboard with no way out. Reset fully.
+                peer.copy.leave()
+                peer.scroll_offset = 0
                 peer.write_out(ansi.ENABLE_MOUSE if peer.mouse_on
                                else ansi.DISABLE_MOUSE)
-                if not peer.mouse_on:
-                    peer.copy.leave()
                 log.info("mouse reporting %s",
                          "on" if peer.mouse_on else "off")
                 await self._paint(peer, session)
@@ -652,7 +731,15 @@ class ITermBackend:
                              for y in range(c.number_of_lines))
             parts.append((s.session_id, hash(text),
                           c.cursor_coord.x, c.cursor_coord.y))
-        return tuple(parts), own
+
+        # Fold in copy-mode / scroll state. These change what's DRAWN (status
+        # bar, selection highlight, scrolled view) without changing iTerm2's
+        # content, so the poll must repaint on them too — otherwise entering or
+        # leaving copy-mode leaves stale chrome on screen (the "can't get out of
+        # copy-mode" symptom: q/Esc worked, but the status bar never got erased).
+        cm = peer.copy
+        copy_state = (cm.active, cm.cy, cm.cx, cm.anchor, peer.scroll_offset)
+        return (tuple(parts), copy_state), own
 
     def _tab_of(self, session):
         for w in self.app.terminal_windows:
@@ -682,11 +769,13 @@ class ITermBackend:
 
         by_id = {s.session_id: s for s in tab.sessions}
         panes = []
+        titles = {}
         for r in regions:
             s = by_id.get(r.session_id)
             if s is None:
                 continue
             try:
+                titles[r.session_id] = s.name or ""
                 # Scrollback is per-pane, so only the ACTIVE pane scrolls — the
                 # others keep showing their live screens. Bailing out of window
                 # mode entirely when scrolled (which is what used to happen)
@@ -708,7 +797,8 @@ class ITermBackend:
             return False
 
         peer.write_out(ansi.render_panes(
-            panes, cols, rows, active_id=session.session_id, copy=peer.copy))
+            panes, cols, rows, active_id=session.session_id, copy=peer.copy,
+            titles=titles))
         return True
 
     async def _paint(self, peer, session, contents=None) -> None:

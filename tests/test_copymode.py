@@ -148,5 +148,68 @@ check("in_bounds rejects cells in the other pane",
       cm.in_bounds(0, 5) and not cm.in_bounds(0, 15)
       and not cm.in_bounds(0, 10))   # the divider itself
 
+print("\n=== split escape sequences (the accidental-quit bug) ===")
+
+import asyncio
+from itermux_bridge.iterm_backend import ITermBackend
+
+
+class _TTY:
+    def size(self): return (120, 40)
+
+
+class _Peer:
+    def __init__(self):
+        self.copy = CopyMode()
+        self.tty = _TTY()
+        self.scroll_offset = 0
+        self.iterm_session_id = "s"
+        self.window_mode = False
+        self.to_app = bytearray()
+
+
+def _drive(inputs):
+    """Feed a list of byte chunks through _copy_key; return the peer."""
+    be = ITermBackend.__new__(ITermBackend)
+    loop = asyncio.new_event_loop()
+    be.loop = loop
+    sess = object()
+    be._session_of = lambda peer: sess
+
+    async def _paint(peer, session, contents=None): pass
+    be._paint = _paint
+    be.on_input = lambda peer, keys: peer.to_app.extend(keys)
+
+    p = _Peer(); p.copy.enter(40)
+    for chunk in inputs:
+        loop.run_until_complete(be._copy_key(p, chunk))
+    # Let any scheduled ESC-timeout tasks finish so the loop closes cleanly.
+    loop.run_until_complete(asyncio.sleep(0.1))
+    loop.close()
+    return p
+
+
+# A split arrow key (ESC then [A) must NOT quit copy-mode — this was the
+# intermittent "accidentally left / can't stay in copy-mode".
+p = _drive([b"\x1b", b"[A"])
+check("split arrow key does not quit copy-mode", p.copy.active)
+check("...and leaks nothing to the app", not p.to_app)
+
+# A real Escape (ESC not continued by [ or O) still quits.
+p = _drive([b"\x1b", b"x"])
+check("a real Esc (not a split arrow) still quits", not p.copy.active)
+
+# A complete arrow key in one chunk still works.
+p = _drive([b"\x1b[A"])
+check("a whole arrow key in one read still works", p.copy.active)
+
+# q still quits.
+p = _drive([b"q"])
+check("q quits", not p.copy.active)
+
+# Split PgUp (ESC[ then 5~) must not quit either.
+p = _drive([b"\x1b[", b"5~"])
+check("split PgUp does not quit copy-mode", p.copy.active)
+
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)

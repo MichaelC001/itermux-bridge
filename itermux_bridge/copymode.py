@@ -63,12 +63,16 @@ class CopyMode:
         #: pane, and a selection that crossed panes would copy the divider
         #: glyphs and the other pane's text along with it.
         self.bounds: Optional[Tuple[int, int, int, int]] = None
+        #: An incomplete escape sequence (e.g. a lone ESC of a split arrow key)
+        #: held over to the next read, so a bare ESC isn't mistaken for "quit".
+        self.pending = bytearray()
 
     # --- lifecycle ---------------------------------------------------------
 
     def enter(self, rows: int, scroll: int = 0, bounds=None) -> None:
         self.active = True
         self.bounds = bounds
+        self.pending = bytearray()
         if bounds is not None:
             bx, by, bw, bh = bounds
             self.cy = by + bh - 1
@@ -96,6 +100,7 @@ class CopyMode:
     def leave(self) -> None:
         self.active = False
         self.anchor = None
+        self.pending = bytearray()
 
     # --- selection ---------------------------------------------------------
 

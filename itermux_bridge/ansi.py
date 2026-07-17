@@ -342,12 +342,19 @@ def render(contents, cols: int, rows: int, scroll_offset: int = 0,
 
 
 def render_panes(panes, cols: int, rows: int, active_id: str = "",
-                 copy=None) -> bytes:
+                 copy=None, titles=None) -> bytes:
     """Composite several panes into one screen, with dividers between them.
 
     `panes` is a list of (Region, ScreenContents) — the whole tab at once, which
     is what attaching to a *window* rather than a single pane means.
+
+    `titles` maps session_id -> pane name; when given, each pane gets a one-line
+    title bar at its top (tmux's `pane-border-status top`), so you can tell the
+    panes apart. The active pane's title is highlighted.
     """
+    titles = titles or {}
+    show_titles = bool(titles)
+
     # Build the screen as a grid of (char, sgr) so overlapping writes are
     # impossible and we can lay panes down in any order.
     blank = (" ", RESET_SGR)
@@ -359,12 +366,20 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
         if contents is None:
             continue
 
+        # Reserve the top row of the pane for its title bar.
+        content_y = region.y + (1 if show_titles else 0)
+        content_h = region.height - (1 if show_titles else 0)
+        if show_titles and content_h >= 1:
+            _draw_pane_title(grid, region, cols,
+                             titles.get(region.session_id, ""),
+                             region.session_id == active_id)
+
         total = contents.number_of_lines
-        top = max(0, total - region.height)
-        n = min(total - top, region.height)
+        top = max(0, total - content_h)
+        n = min(total - top, content_h)
 
         for i in range(n):
-            y = region.y + i
+            y = content_y + i
             if not (0 <= y < rows):
                 continue
             line = contents.line(top + i)
@@ -408,7 +423,7 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
 
         if region.session_id == active_id:
             coord = contents.cursor_coord
-            cy = region.y + (coord.y - _origin_y(contents) - top)
+            cy = content_y + (coord.y - _origin_y(contents) - top)
             cx = region.x + coord.x
             if 0 <= cy < rows and 0 <= cx < cols:
                 cursor = (cy, cx)
@@ -473,6 +488,47 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
         out += HIDE_CURSOR
     out += END_SYNC
     return bytes(out)
+
+
+#: Pane title bar. Reverse-video keeps it readable as a header band; the active
+#: pane's title is green to match its border.
+TITLE_SGR = b"\033[0;7m"
+ACTIVE_TITLE_SGR = b"\033[0;7;32m"
+
+
+def _draw_pane_title(grid, region, cols: int, name: str, active: bool) -> None:
+    """Fill a pane's top row with its name, tmux's pane-border-status top."""
+    sgr = ACTIVE_TITLE_SGR if active else TITLE_SGR
+    label = f" {name} " if name else " "
+
+    # Clip the label to the pane width (by display cells, for CJK names).
+    text, used = [], 0
+    for ch in label:
+        w = _char_width(ch)
+        if used + w > region.width:
+            break
+        text.append(ch)
+        used += w
+
+    y = region.y
+    if not (0 <= y < len(grid)):
+        return
+    col = 0
+    for ch in text:
+        gx = region.x + col
+        w = _char_width(ch)
+        if gx >= cols:
+            break
+        grid[y][gx] = (ch, sgr)
+        if w == 2 and gx + 1 < cols:
+            grid[y][gx + 1] = ("", sgr)
+        col += w
+    # Pad the rest of the title row so the band spans the whole pane width.
+    while col < region.width:
+        gx = region.x + col
+        if 0 <= gx < cols:
+            grid[y][gx] = (" ", sgr)
+        col += 1
 
 
 def _draw_dividers(grid, panes, cols: int, rows: int,
