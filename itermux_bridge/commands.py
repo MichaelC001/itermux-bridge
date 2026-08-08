@@ -161,10 +161,7 @@ def _window_target(backend, mapper, app, cmd: str, target):
 
 async def _activate(backend, peer, session):
     """Make `session` the pane this client is showing."""
-    try:
-        await session.async_activate()
-    except Exception as e:
-        log.warning("activate failed: %s", e)
+    await backend.api.activate(session)
     peer.iterm_session_id = session.session_id
     peer.copy.leave()
     peer.scroll_offset = 0

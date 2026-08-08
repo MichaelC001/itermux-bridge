@@ -62,10 +62,7 @@ class InputRouter:
                 await self._send_raw(session, ev.encode())
             return
 
-        try:
-            mode = await session.async_get_variable("mouseReportingMode")
-        except Exception:
-            mode = -1
+        mode = await self.api.variable(session, "mouseReportingMode", -1)
         # iTerm2 reports -1 for "mouse reporting off" — NOT 0. A truthiness test
         # (`bool(mode)`) treats -1 as enabled and forwards the wheel to a plain
         # shell that will never use it, so scrollback silently stops working.

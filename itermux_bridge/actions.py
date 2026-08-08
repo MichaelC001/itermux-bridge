@@ -9,16 +9,9 @@ rendering (view.py) so each stays readable on its own.
 
 import logging
 
-import iterm2
-
 from . import ansi
 
 log = logging.getLogger(__name__)
-
-#: iTerm2 has no zoom API, but it exposes the menu item — and its `checked`
-#: state makes it a real toggle, matching Ctrl-B z.
-MENU_MAXIMIZE = "Maximize Active Pane"
-
 
 class PrefixActions:
     """Execution of the tmux prefix bindings against iTerm2."""
@@ -31,9 +24,7 @@ class PrefixActions:
         self._spawn(self._prefix(peer, sid, action), f"prefix {action}")
 
     async def _prefix(self, peer, sid: str, action: str) -> None:
-        import iterm2
-
-        session = self.app.get_session_by_id(sid)
+        session = self.api.pane(sid)
         if session is None:
             return
 
@@ -84,17 +75,17 @@ class PrefixActions:
                 return          # the client's own terminal handles paste
 
             if action == "zoom":
-                await self._zoom(session)
+                await self.api.zoom(session)
 
             elif action in ("split-horizontal", "split-vertical"):
-                new = await session.async_split_pane(
-                    vertical=(action == "split-vertical"))
+                new = await self.api.split(
+                    session, vertical=(action == "split-vertical"))
                 # Follow the new pane, like tmux does.
                 if new is not None:
                     peer.iterm_session_id = new.session_id
 
             elif action == "kill-pane":
-                await session.async_close()
+                await self.api.close_pane(session)
                 peer.detach(status=0)
                 return
 
@@ -106,50 +97,29 @@ class PrefixActions:
                        else "previous-window")
                 target = _window_target(self, self.mapper, self.app, cmd, None)
                 if target is not None:
-                    await target.async_activate()
+                    await self.api.activate(target)
                     peer.iterm_session_id = target.session_id
                     peer.copy.leave()
 
             elif action in ("next-pane", "select-left", "select-right",
                             "select-up", "select-down"):
-                target = await self._neighbour(session, action)
+                target = await self._pane_in_direction(session, action)
                 if target is not None:
-                    await target.async_activate()
+                    await self.api.activate(target)
                     peer.iterm_session_id = target.session_id
 
-            await self.app.async_refresh()
+            await self.api.refresh()
             peer.scroll_offset = 0
-            await self._paint(peer, self.app.get_session_by_id(
-                peer.iterm_session_id) or session)
+            await self._paint(peer,
+                              self.api.pane(peer.iterm_session_id) or session)
 
         except Exception as e:
             log.warning("prefix %s failed: %s", action, e)
 
-    async def _zoom(self, session) -> None:
-        """Toggle iTerm2's 'Maximize Active Pane' — the analogue of Ctrl-B z.
 
-        There is no zoom method on the API objects, but iTerm2 exposes the menu
-        item, and its `checked` state tells us whether the pane is already
-        zoomed — so this is a real toggle, not a one-way trip.
-        """
-        import iterm2
-
-        # The menu acts on whatever iTerm2 considers active, so point it at the
-        # pane this client is actually looking at first.
-        await session.async_activate()
-        await iterm2.MainMenu.async_select_menu_item(
-            self.connection, MENU_MAXIMIZE)
-
-    async def _neighbour(self, session, action: str):
-        """The pane to move to, within the same tab."""
-        import iterm2
-
-        tab = None
-        for w in self.app.terminal_windows:
-            for t in w.tabs:
-                if any(s.session_id == session.session_id for s in t.sessions):
-                    tab = t
-                    break
+    async def _pane_in_direction(self, session, action: str):
+        """Resolve a select-* / next-pane action to the pane it means."""
+        tab = self.api.tab_of(session.session_id)
         if tab is None or len(tab.sessions) < 2:
             return None
 
@@ -159,17 +129,7 @@ class PrefixActions:
             return tab.sessions[(i + 1) % len(ids)]
 
         direction = {
-            "select-left": iterm2.NavigationDirection.LEFT,
-            "select-right": iterm2.NavigationDirection.RIGHT,
-            "select-up": iterm2.NavigationDirection.ABOVE,
-            "select-down": iterm2.NavigationDirection.BELOW,
-        }[action]
-        await session.async_activate()
-        try:
-            # Returns a session ID (a string), not a Session object.
-            new_id = await tab.async_select_pane_in_direction(direction)
-        except Exception as e:
-            log.debug("select_pane_in_direction failed: %s", e)
-            return None
-        return self.app.get_session_by_id(new_id) if new_id else None
-
+            "select-left": "left", "select-right": "right",
+            "select-up": "above", "select-down": "below",
+        }.get(action)
+        return await self.api.neighbour(tab, session, direction)

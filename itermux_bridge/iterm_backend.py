@@ -8,7 +8,8 @@ import iterm2
 
 from . import ansi, copymode, layout, mouse
 from .mapper import SessionMapper
-from .actions import MENU_MAXIMIZE, PrefixActions
+from .actions import PrefixActions
+from .iterm.api import ITermAPI
 from .input import InputRouter
 from .view import REFRESH_INTERVAL, ScreenView
 
@@ -21,6 +22,9 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
     def __init__(self, connection, app, mapper: SessionMapper) -> None:
         self.connection = connection
         self.app = app
+        #: The ONLY component that touches the iTerm2 SDK. Everything above
+        #: goes through it, which is what keeps those layers testable.
+        self.api = ITermAPI(connection, app)
         self.mapper = mapper
         self.loop = asyncio.get_event_loop()
         #: peer -> pump task streaming that peer's target session
@@ -34,17 +38,14 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
     async def _attach(self, peer) -> None:
         if peer.requested_session_id:
             # An explicit `-t` wins — commands.py already resolved it.
-            session = self.app.get_session_by_id(peer.requested_session_id)
+            session = self.api.pane(peer.requested_session_id)
 
             # ...unless it's the client's OWN terminal. Rendering a pane into
             # itself is a feedback loop: the paint changes the pane, which
             # triggers another paint. It never settles and just looks hung, so
             # say so instead of silently freezing.
             if session is not None and peer.ttyname:
-                try:
-                    tty = await session.async_get_variable("tty")
-                except Exception:
-                    tty = None
+                tty = await self.api.variable(session, "tty")
                 if tty == peer.ttyname:
                     peer.write_out(
                         b"\033[31mitermux-bridge:\033[m that pane is this very "
@@ -84,8 +85,7 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
         await self._pump_screen(peer, session)
 
     def _session_of(self, peer):
-        sid = getattr(peer, "iterm_session_id", None)
-        return self.app.get_session_by_id(sid) if sid else None
+        return self.api.pane(getattr(peer, "iterm_session_id", None))
 
     def _spawn(self, coro, what: str):
         """Run a coroutine as a task, but never let its exception vanish.
@@ -125,17 +125,11 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
     # --- internals ---------------------------------------------------------
 
     async def _send(self, session, text: str) -> None:
-        try:
-            await session.async_send_text(text)
-        except Exception as e:
-            log.warning("send_text failed: %s", e)
+        await self.api.send_text(session, text)
 
     async def _send_raw(self, session, data: bytes) -> None:
         """Send raw control bytes (e.g. a mouse report) to the session."""
-        try:
-            await session.async_send_text(data.decode("latin-1"))
-        except Exception as e:
-            log.warning("send raw failed: %s", e)
+        await self.api.send_text(session, data.decode("latin-1"))
 
     def _tab_of(self, session):
         for w in self.app.terminal_windows:

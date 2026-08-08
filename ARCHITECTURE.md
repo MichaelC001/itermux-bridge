@@ -23,17 +23,16 @@
 3. **多客户端共享同一 iTerm2 会话,但各自独立视图**
    每个 peer 有独立的 `scroll_offset` / `copy` 状态(隔离正确),但没有真 tmux 的"多客户端共享同一 window 的 attach 语义"。
 
-### 明确缺失的常用命令
+### 命令覆盖
 
-已实现:`attach` `ls` `list-windows` `list-panes` `send-keys` `display-message` `kill-server`
+已实现:`attach` `ls` `list-windows` `list-panes` `send-keys` `display-message`
+`has-session` `detach-client` `select-window` / `next-window` / `previous-window`
 
-**缺失且常用**:
-- `detach-client` / `kill-session` / `kill-window`
-- `select-window` / `next-window` / `previous-window`(Ctrl-B n/p 切 window)
-- `rename-window` / `rename-session`
-- `resize-pane`
-- `split-window` 的 `-h/-v` 参数解析(目前只有 prefix 绑定)
-- `has-session`(脚本常用,判断是否存在)
+`kill-session` / `kill-window` 刻意拒绝执行 —— 桥不拥有那些 iTerm2 终端的生命
+周期,杀掉会毁掉用户真实的工作,故改为 detach 并说明。
+
+仍缺:`rename-window` / `rename-session` / `resize-pane`、`split-window` 的
+`-h/-v` 参数解析(目前只有 prefix 绑定)。
 
 ## 二、当前的架构问题
 
@@ -54,7 +53,7 @@ iterm_backend.py  880 行 / 34 个方法  ← 单一类混杂 6 种职责
 
 **已经做对的**:除 `iterm_backend.py` 外,几乎所有模块**不依赖 iterm2 SDK**,协议层天然可复用。
 
-## 三、拆分方案
+## 三、拆分方案(已实施)
 
 按 **"tmux 主体功能" × "复用程度"** 两个维度切:
 
@@ -128,3 +127,41 @@ class Backend(Protocol):
 3. **pane 中途消失**:`get_session_by_id` 返回 None 时多数路径只是 `return`,客户端会看到画面冻结而非明确提示。
 4. **客户端小于 iTerm2 窗口**:目前裁切。至少应在状态栏提示尺寸不匹配。
 5. **补齐 `has-session` / `detach-client` / `select-window`**:脚本化使用的常见依赖。
+
+
+---
+
+## 五、实施结果
+
+拆分与加固已完成,九个测试套件全绿,两台机器 live 验证通过。
+
+```
+拆分前                        拆分后
+iterm_backend.py  929 行  →   140 行(只做组装)
+ansi.py           598 行  →   464 行 + sgr.py 153 行
+```
+
+最终分层:
+
+| 模块 | 行数 | 职责 | 依赖 iterm2 SDK |
+|---|---|---|---|
+| `protocol.py` `imsg_codec.py` `gateway.py` `peer.py` `tty.py` | ~800 | tmux 协议 | ❌ |
+| `keys.py` `sgr.py` `ansi.py` `layout.py` `mouse.py` `copymode.py` | ~1100 | 终端语义 | ❌ |
+| `mapper.py` `commands.py` `backend.py` | ~600 | 会话模型 | ❌ |
+| `iterm/api.py` | 195 | **唯一** 的 SDK 封装 | ✅ |
+| `view.py` `input.py` `actions.py` | ~780 | 交互编排 | ❌ |
+| `iterm_backend.py` | 140 | 组装 | ✅(仅构造 ITermAPI) |
+
+**关键成果:所有 iTerm2 SDK 调用收拢进 `iterm/api.py`。** 上层通过 `self.api`
+访问,SDK 的失败(pane 中途消失、连接抖动)在那一层统一降级为 `None`/no-op,
+不再让每个调用点各写一遍 try/except。
+
+拆分立即兑现的价值:`test_prefix.py` 现在直接测 `keys.PrefixState`,不再需要
+伪造 `Peer` —— 测的是真实代码路径。
+
+## 六、仍未做的
+
+- `mapper.py` 仍直接读 `app.terminal_windows` / `get_session_by_id`。这些是
+  同步只读查找,不会失败,收益低于改动成本,故保留。
+- `resize-pane` / `rename-window` / `.tmux.conf` 解析仍未实现。
+- 客户端 resize 仍不重排布局(见 §一)。

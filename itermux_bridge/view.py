@@ -13,8 +13,6 @@ and they are far easier to reason about in isolation.
 import asyncio
 import logging
 
-import iterm2
-
 from . import ansi, layout
 
 log = logging.getLogger(__name__)
@@ -37,7 +35,7 @@ class ScreenView:
         """
         if not peer.window_mode:
             try:
-                contents = await session.async_get_screen_contents()
+                contents = await self.api.screen(session)
             except Exception:
                 return None
             return ansi.visible_lines(contents, cols, rows, peer.scroll_offset)
@@ -54,7 +52,7 @@ class ScreenView:
             if s is None:
                 continue
             try:
-                c = await s.async_get_screen_contents()
+                c = await self.api.screen(s)
             except Exception:
                 continue
             for i, text in enumerate(
@@ -100,7 +98,7 @@ class ScreenView:
                 # Always re-resolve the target: zoom/select-pane/split all move
                 # it, and a stale handle is exactly what froze the display.
                 sid = peer.iterm_session_id
-                current = self.app.get_session_by_id(sid)
+                current = self.api.pane(sid)
                 if current is None:
                     # The pane we were showing went away (closed, or its tab
                     # did). Breaking here just froze the client's screen with no
@@ -163,7 +161,7 @@ class ScreenView:
         own = None
         for s in sessions:
             try:
-                c = await s.async_get_screen_contents()
+                c = await self.api.screen(s)
             except Exception:
                 continue
             if s.session_id == session.session_id:
@@ -219,12 +217,12 @@ class ScreenView:
                 # moment you pressed PgUp.
                 if (peer.scroll_offset > 0
                         and s.session_id == session.session_id):
-                    contents = await self._history(
+                    contents = await self.api.history(
                         s, r.height, peer.scroll_offset)
                     if contents is None:
-                        contents = await s.async_get_screen_contents()
+                        contents = await self.api.screen(s)
                 else:
-                    contents = await s.async_get_screen_contents()
+                    contents = await self.api.screen(s)
                 panes.append((r, contents))
             except Exception as e:
                 log.debug("pane %s contents failed: %s", r.session_id[:8], e)
@@ -271,7 +269,7 @@ class ScreenView:
         if peer.scroll_offset > 0:
             # async_get_screen_contents() returns the visible grid only, so it
             # can't serve a scrolled-back view. Ask for an explicit line range.
-            scrolled = await self._history(session, rows, peer.scroll_offset)
+            scrolled = await self.api.history(session, rows, peer.scroll_offset)
             if scrolled is not None:
                 peer.write_out(ansi.render(scrolled, cols, rows, copy=peer.copy))
                 return
@@ -279,38 +277,8 @@ class ScreenView:
             peer.scroll_offset = 0
 
         if contents is None:
-            contents = await session.async_get_screen_contents()
+            contents = await self.api.screen(session)
         peer.write_out(ansi.render(contents, cols, rows,
                                    scroll_offset=peer.scroll_offset,
                                    copy=peer.copy))
 
-    async def _history(self, session, rows: int, offset: int):
-        """Fetch `rows` lines ending `offset` lines above the live screen."""
-        import iterm2
-
-        try:
-            contents = await session.async_get_screen_contents()
-            origin = int(contents.windowed_coord_range.start.y)
-        except Exception as e:
-            log.debug("cannot locate screen origin: %s", e)
-            return None
-
-        start = origin - offset
-        if start < 0:
-            start = 0
-        end = start + rows
-
-        rng = iterm2.util.WindowedCoordRange(
-            iterm2.util.CoordRange(
-                iterm2.util.Point(0, start),
-                iterm2.util.Point(0, end)))
-        try:
-            result = await iterm2.rpc.async_get_screen_contents(
-                session.connection, session.session_id, rng, True)
-            resp = result.get_buffer_response
-            if resp.status != iterm2.api_pb2.GetBufferResponse.Status.Value("OK"):
-                return None
-            return iterm2.screen.ScreenContents(resp)
-        except Exception as e:
-            log.debug("history fetch failed: %s", e)
-            return None
