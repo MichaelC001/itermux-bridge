@@ -8,6 +8,7 @@ import struct
 from typing import Optional
 
 from . import imsg_codec as codec
+from . import keys as keymap
 from . import mouse
 from .copymode import CopyMode
 from .protocol import CLIENT_CONTROL, Msg
@@ -15,51 +16,8 @@ from .tty import ClientTTY
 
 log = logging.getLogger(__name__)
 
-#: The tmux prefix key, Ctrl-B (0x02). tmux's own default.
-PREFIX = b"\x02"
-
-#: Prefix bindings, using tmux's own defaults. Each maps to an action the
-#: backend translates into an iTerm2 operation. ('d' -> detach is handled
-#: separately, since it's the peer's own business, not the backend's.)
-PREFIX_KEYS = {
-    b"z": "zoom",              # toggle maximize the active pane
-    b"o": "next-pane",         # cycle to the next pane
-    b"x": "kill-pane",
-    b'"': "split-horizontal",  # split into top/bottom
-    b"%": "split-vertical",    # split into left/right
-    # vi-style pane selection, which tmux also accepts.
-    b"h": "select-left",
-    b"j": "select-down",
-    b"k": "select-up",
-    b"l": "select-right",
-    b"[": "copy-mode",         # enter copy-mode, as in tmux
-    b"]": "paste",
-    b"m": "toggle-mouse",      # tmux's `set -g mouse on/off`
-    # Paging for keyboards with no PgUp/PgDn (MacBooks, most compact boards).
-    # These reach the scrollback WITHOUT having to enter copy-mode first.
-    b"\x15": "page-up",        # Ctrl-B Ctrl-U
-    b"\x04": "page-down",      # Ctrl-B Ctrl-D
-    b"u": "page-up",           # Ctrl-B u  (no modifier needed at all)
-    b"n": "page-down",         # Ctrl-B n  ('d' is taken by detach)
-}
-
-#: Arrow keys are MULTI-BYTE escape sequences, so they can't live in the
-#: single-byte table above — matching a byte at a time never sees them and
-#: `Ctrl-B <Up>` silently does nothing. Both the normal (CSI) and application
-#: (SS3) cursor-key forms are sent by real terminals depending on mode.
-PREFIX_SEQS = {
-    b"\x1b[A": "select-up",     b"\x1bOA": "select-up",
-    b"\x1b[B": "select-down",   b"\x1bOB": "select-down",
-    b"\x1b[C": "select-right",  b"\x1bOC": "select-right",
-    b"\x1b[D": "select-left",   b"\x1bOD": "select-left",
-    # `Ctrl-B PgUp` enters copy-mode AND pages up in one go, as tmux does —
-    # otherwise reading a pane's history means Ctrl-B [ first, every time.
-    b"\x1b[5~": "page-up",
-    b"\x1b[6~": "page-down",
-}
-
-#: Longest sequence we may need to accumulate before deciding.
-_MAX_SEQ = max(len(s) for s in PREFIX_SEQS)
+#: Re-exported so callers (and tests) can reference the prefix key.
+PREFIX = keymap.PREFIX
 
 
 def _cstr(payload: bytes) -> str:
@@ -96,10 +54,9 @@ class Peer:
         self._pump_task: Optional[asyncio.Task] = None
         self._outbuf = bytearray()
         self._write_armed = False
-        #: True once PREFIX is seen, while we wait for the command key.
-        self._await_command = False
-        #: Bytes collected since the prefix, for multi-byte keys (arrows).
-        self._pending = bytearray()
+        #: The prefix-key state machine (bindings, repeat window, multi-byte
+        #: sequence assembly). Pure logic, lives in keys.py.
+        self.prefix = keymap.PrefixState(loop.time)
         #: How many lines back through iTerm2's scrollback this client is
         #: looking. 0 = live screen.
         self.scroll_offset = 0
@@ -284,6 +241,15 @@ class Peer:
         self.backend.on_attach(self)
         if self.stdin_fd is not None:
             self._pump_task = self.loop.create_task(self._pump_stdin())
+            self._pump_task.add_done_callback(self._pump_done)
+
+    def _pump_done(self, task) -> None:
+        """Surface a crashed stdin pump instead of losing the exception."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("stdin pump died: %r", exc, exc_info=exc)
 
     def _on_resize(self) -> None:
         if not self.tty:
@@ -360,71 +326,20 @@ class Peer:
                 pass
 
     def _handle_prefix(self, data: bytes) -> bytes:
-        """Intercept the tmux prefix key (Ctrl-B) and its command.
+        """Run client input through the prefix machine.
 
-        This is the server's job in real tmux: the prefix is swallowed, never
-        forwarded to the application. Without it, `Ctrl-B d` just gets typed
-        into whatever program is running.
-
-        The prefix and the command that follows may arrive in the same read or
-        be split across reads, so the "am I waiting for a command?" bit has to
-        live on the peer, not in this call.
+        Returns the bytes that belong to the application; any prefix actions it
+        recognised are dispatched here.
         """
-        out = bytearray()
-
-        for byte in data:
-            ch = bytes([byte])
-
-            if self._await_command:
-                self._pending += ch
-
-                # An arrow key is ESC [ A — three bytes. Keep collecting while
-                # what we have could still become a bound sequence, otherwise a
-                # byte-at-a-time match would never see it.
-                if any(s.startswith(self._pending) and s != self._pending
-                       for s in PREFIX_SEQS):
-                    if len(self._pending) < _MAX_SEQ:
-                        continue
-
-                seq = bytes(self._pending)
-                self._pending = bytearray()
-                self._await_command = False
-
-                action = PREFIX_SEQS.get(seq) or (
-                    PREFIX_KEYS.get(seq) if len(seq) == 1 else None)
-
-                if seq in (b"d", b"D"):
-                    log.info("prefix d -> detach")
-                    self.detach(status=0)
-                    # Return what was typed BEFORE the prefix — those keys are
-                    # real input and the app should still get them. Returning
-                    # b"" here would silently swallow them.
-                    return bytes(out)
-
-                if seq == PREFIX:
-                    # Ctrl-B Ctrl-B sends a literal Ctrl-B, as in real tmux.
-                    out += PREFIX
-                    continue
-
-                if action:
-                    log.info("prefix %r -> %s", seq, action)
-                    self.backend.on_prefix_command(self, action)
-                    continue
-
-                # Unbound key: real tmux beeps and drops it. Don't pass either
-                # the prefix or the key through, or we'd inject junk into the
-                # app (e.g. `Ctrl-B c` would type a stray "c").
-                log.debug("prefix + unbound key %r; ignored", seq)
-                continue
-
-            if ch == PREFIX:
-                self._await_command = True
-                self._pending = bytearray()
-                continue
-
-            out += ch
-
-        return bytes(out)
+        result = self.prefix.feed(data)
+        for action in result.actions:
+            if action == keymap.DETACH:
+                log.info("prefix d -> detach")
+                self.detach(status=0)
+                break
+            log.info("prefix -> %s", action)
+            self.backend.on_prefix_command(self, action)
+        return result.passthrough
 
     # --- teardown ---------------------------------------------------------
 
@@ -495,6 +410,8 @@ class Peer:
                 except OSError:
                     pass
         self.stdin_fd = self.stdout_fd = None
+        # Any fd the client sent that no frame ever claimed is still ours.
+        self.decoder.close()
 
         try:
             self.loop.remove_reader(self.sock.fileno())

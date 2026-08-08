@@ -10,6 +10,7 @@ Wire format (struct imsg_hdr, native endian, no padding on the platforms tmux ru
 File descriptors ride out-of-band via SCM_RIGHTS, not in the payload.
 """
 
+import os
 import struct
 from typing import NamedTuple, Optional
 
@@ -68,14 +69,46 @@ class Decoder:
     (header says how long) has arrived.
     """
 
+    #: A frame can never exceed MAX_IMSGSIZE, so a buffer larger than that plus
+    #: one header means the peer is feeding us bytes that will never complete a
+    #: frame. Refuse rather than growing without bound.
+    MAX_BUFFER = MAX_IMSGSIZE + IMSG_HEADER_SIZE
+
+    #: tmux attaches at most 2 fds (stdin, stdout). Anything beyond a small
+    #: allowance is a client leaking descriptors into us — and every fd we hold
+    #: and never claim is one leaked from OUR process table.
+    MAX_PENDING_FDS = 8
+
     def __init__(self) -> None:
         self._buf = bytearray()
         self._fds: list = []
 
     def feed(self, data: bytes, fds: Optional[list] = None) -> None:
+        if len(self._buf) + len(data) > self.MAX_BUFFER:
+            raise ValueError(
+                f"imsg buffer overflow: {len(self._buf) + len(data)} bytes "
+                f"without a complete frame (max {self.MAX_BUFFER})")
         self._buf.extend(data)
         if fds:
             self._fds.extend(fds)
+            # Unclaimed fds are ours now; if a peer sends more than any real
+            # client would, close the excess instead of leaking them.
+            while len(self._fds) > self.MAX_PENDING_FDS:
+                stale = self._fds.pop(0)
+                try:
+                    os.close(stale)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        """Release any fds received but never claimed by a frame."""
+        for fd in self._fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds.clear()
+        self._buf.clear()
 
     def __iter__(self):
         return self

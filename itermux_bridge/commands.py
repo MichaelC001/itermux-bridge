@@ -127,6 +127,50 @@ def _names_a_window(target: str) -> bool:
     return False
 
 
+def _window_target(backend, mapper, app, cmd: str, target):
+    """Resolve select-window / next-window / previous-window to a pane.
+
+    Windows are iTerm2 tabs; "switching window" means activating a pane in the
+    neighbouring tab. Returns the iTerm2 session to activate, or None.
+    """
+    flat = list(mapper.flat_panes(app))
+    if not flat:
+        return None
+
+    # Windows in order, with their active pane.
+    windows = []
+    for _s, w, p in flat:
+        if not windows or windows[-1][0] != w["id"]:
+            windows.append((w["id"], p))
+        elif p["active"]:
+            windows[-1] = (w["id"], p)
+    if not windows:
+        return None
+
+    if cmd in ("select-window", "selectw") and target is not NO_TARGET:
+        session = resolve_target(mapper, app, str(target))
+        return session
+
+    # next / previous relative to the currently active window.
+    cur = next((i for i, (_wid, p) in enumerate(windows)
+                if p["active"]), 0)
+    step = 1 if cmd in ("next-window", "next") else -1
+    _wid, pane = windows[(cur + step) % len(windows)]
+    return app.get_session_by_id(pane["iterm_session_id"])
+
+
+async def _activate(backend, peer, session):
+    """Make `session` the pane this client is showing."""
+    try:
+        await session.async_activate()
+    except Exception as e:
+        log.warning("activate failed: %s", e)
+    peer.iterm_session_id = session.session_id
+    peer.copy.leave()
+    peer.scroll_offset = 0
+    await backend._paint(peer, session)
+
+
 def _sessions_for(tree, target):
     """The session(s) a session-scoped command should act on.
 
@@ -276,15 +320,50 @@ def dispatch(backend, peer, argv) -> None:
         # Don't log key contents — they may be passwords (§11.5).
         log.info("send-keys -> %s (%d tokens)", target, len(keys))
         data = b"".join(_key_bytes(k) for k in keys)
-        backend.loop.create_task(
-            backend._send(session, data.decode("utf-8", "replace")))
+        backend._spawn(backend._send(session, data.decode("utf-8", "replace")),
+                       "send-keys command")
         _reply(peer, "")
 
     elif cmd in ("display-message", "display"):
         _reply(peer, " ".join(args) + "\n")
 
-    elif cmd == "kill-server":
+    elif cmd in ("has-session", "has"):
+        # Scripts use this to test for a session before attaching. Exit status
+        # is the answer: 0 = exists, 1 = doesn't.
+        target, _rest = _target_pane(args)
+        tree = mapper.inventory(app)
+        if target is NO_TARGET:
+            _reply(peer, "", status=0 if tree else 1)
+        else:
+            found = _sessions_for(tree, target) is not None
+            _reply(peer, "" if found
+                   else f"can't find session: {target}\n",
+                   status=0 if found else 1)
+
+    elif cmd in ("detach-client", "detach"):
+        # Detach this client (or, with -a, every attached client).
+        if "-a" in args:
+            for other in list(getattr(backend, "_pumps", {}).keys()):
+                if other is not peer and not other.closed:
+                    other.detach(status=0)
+        peer.detach(status=0)
+
+    elif cmd in ("select-window", "selectw", "next-window", "next",
+                 "previous-window", "prev"):
+        target, _rest = _target_pane(args)
+        session = _window_target(backend, mapper, app, cmd, target)
+        if session is None:
+            _reply(peer, "can't find window\n", status=1)
+            return
+        backend._spawn(_activate(backend, peer, session), "select-window")
         _reply(peer, "")
+
+    elif cmd in ("kill-server", "kill-session", "kill-window"):
+        # We don't own the iTerm2 sessions' lifetimes — killing them would
+        # destroy the user's real work. Detach instead, and say so.
+        _reply(peer, "itermux-bridge: not killing iTerm2 sessions; "
+                     "detaching instead\n")
+        peer.detach(status=0)
 
     else:
         _reply(peer, f"unknown command: {shlex.join(argv)}\n", status=1)

@@ -94,7 +94,8 @@ itermux-bridge install | uninstall | status | logs [-f] | doctor
 
 Attach/detach, live screen streaming, keyboard input, mouse (wheel/click/drag),
 prefix bindings, `send-keys`, `list-panes`, `list-windows`, `list-sessions`,
-`display-message`.
+`has-session`, `detach-client`, `select-window` / `next-window` /
+`previous-window`, `display-message`.
 
 **Prefix bindings** (`Ctrl-B`), mapped onto the equivalent iTerm2 operation:
 
@@ -107,6 +108,7 @@ prefix bindings, `send-keys`, `list-panes`, `list-windows`, `list-sessions`,
 | `"` / `%` | split horizontally / vertically | `async_split_pane` |
 | `x` | kill pane | close the split |
 | `PgUp` / `PgDn` | page through the pane's scrollback | — |
+| `n` / `p` | next / previous window (tab) | activate the neighbouring tab |
 | `[` | copy-mode (select text) | — |
 | `m` | toggle mouse reporting (`set -g mouse`) | — |
 | `Ctrl-B` | send a literal `Ctrl-B` | — |
@@ -116,7 +118,7 @@ there are several ways in:
 
 | | |
 |---|---|
-| `Ctrl-B u` / `Ctrl-B n` | page up / down — the shortest, no modifier needed |
+| `Ctrl-B u` / `Ctrl-B e` | page up / down — the shortest, no modifier needed |
 | `Ctrl-B Ctrl-U` / `Ctrl-B Ctrl-D` | same, vi-style |
 | `Ctrl-B PgUp` / `Ctrl-B PgDn` | if you do have the keys |
 
@@ -164,9 +166,11 @@ Careful, if you turn it on: iTerm2 reports `mouseReportingMode = **-1**` when
 reporting is off, not `0` — a truthiness check treats that as "enabled" and
 silently breaks scrollback.
 
-Not implemented: control mode (`-CC`), copy-mode, `.tmux.conf`, splits/layout
-commands. Renders one session per client; the client's terminal does the drawing
-(normal mode, not control mode), so any tmux version on any terminal works.
+Not implemented: control mode (`-CC`), `.tmux.conf` parsing, `resize-pane`,
+`rename-window`. Killing sessions is deliberately refused — the bridge doesn't
+own those terminals' lifetimes, so `kill-session` detaches instead. The client's
+terminal does the drawing (normal mode, not control mode), so any tmux version
+on any terminal works.
 
 ## Protocol notes
 

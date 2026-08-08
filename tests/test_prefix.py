@@ -9,30 +9,45 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from itermux_bridge.peer import PREFIX, Peer
+from itermux_bridge import keys as keymap
+from itermux_bridge.keys import PREFIX, PrefixState
 
 
-class FakeBackend:
+class _Clock:
+    """Fake monotonic clock so the repeat window is deterministic."""
+    def __init__(self): self.t = 1000.0
+    def time(self): return self.t
+
+
+class FakePeer:
+    """Drives PrefixState the way Peer does, recording what came out.
+
+    The prefix machine is pure logic now (keys.py), so these tests need no
+    socket, no fds and no iTerm2 — they exercise the real code path.
+    """
+
     def __init__(self):
-        self.actions = []
-
-    def on_prefix_command(self, peer, action):
-        self.actions.append(action)
-
-
-class FakePeer(Peer):
-    """Just the prefix machine — no socket, no fds."""
-
-    def __init__(self):
+        self.clock = _Clock()
+        self.loop = self.clock          # .time() is all PrefixState needs
+        self.prefix = PrefixState(self.clock.time)
         self.detached = False
-        self._await_command = False
-        self._pending = bytearray()
-        self.closed = False
-        self.backend = FakeBackend()
-        self.mouse_on = False       # tmux's default: the terminal keeps the mouse
+        self.backend = type("B", (), {"actions": None})()
+        self.backend.actions = []
 
-    def detach(self, status=0, message=""):
-        self.detached = True
+    def _handle_prefix(self, data: bytes) -> bytes:
+        result = self.prefix.feed(data)
+        for action in result.actions:
+            if action == keymap.DETACH:
+                self.detached = True
+                break
+            self.backend.actions.append(action)
+        return result.passthrough
+
+    # tests poke these; keep the old names working
+    @property
+    def _await_command(self): return self.prefix.awaiting
+    @property
+    def _pending(self): return self.prefix.pending
 
 
 ok = True
@@ -177,12 +192,49 @@ print("\n=== mouse ownership ===")
 # that makes real tmux feel native (its default is `mouse off`). Default OFF, and
 # let Ctrl-B m turn it on for the cases that want the wheel or a TUI's clicks.
 p = FakePeer()
-check("mouse reporting is OFF by default, like tmux", not p.mouse_on)
-
-p = FakePeer()
 p._handle_prefix(PREFIX + b"m")
 check("Ctrl-B m is bound to toggle-mouse",
       p.backend.actions == ["toggle-mouse"], f"({p.backend.actions})")
+
+print("\n=== repeat (bind -r): hold arrows to walk panes ===")
+
+# tmux's repeat: after a repeatable action, the next repeatable key fires
+# WITHOUT re-pressing the prefix. Pane navigation is the case everyone hits.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"\x1b[D")     # Ctrl-B Left
+p._handle_prefix(b"\x1b[D")              # bare Left  (repeat)
+p._handle_prefix(b"\x1b[D")              # bare Left  (repeat)
+check("Ctrl-B ← then ← ← repeats without re-pressing prefix",
+      p.backend.actions == ["select-left"] * 3, f"({p.backend.actions})")
+
+p = FakePeer()
+p._handle_prefix(PREFIX + b"\x1b[D")
+p._handle_prefix(b"\x1b[A")
+p._handle_prefix(b"\x1b[C")
+check("directions can change within the repeat window",
+      p.backend.actions == ["select-left", "select-up", "select-right"])
+
+# After the window times out, a bare key is normal input again.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"\x1b[D")
+p.clock.t += 1.0                          # past the 500ms window
+out = p._handle_prefix(b"x")
+check("a key after the window times out is typed to the app",
+      out == b"x" and p.backend.actions == ["select-left"], f"({out!r})")
+
+# A non-repeatable key inside the window closes it and passes through.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"\x1b[D")
+out = p._handle_prefix(b"x")
+check("a non-repeatable key in the window is typed, not run",
+      out == b"x" and p.backend.actions == ["select-left"], f"({out!r})")
+
+# A non-repeatable action (zoom) does NOT open a repeat window.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"z")
+out = p._handle_prefix(b"z")
+check("zoom does not repeat; a second bare z is typed",
+      out == b"z" and p.backend.actions == ["zoom"], f"({out!r})")
 
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)
