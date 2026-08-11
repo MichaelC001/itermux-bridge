@@ -62,6 +62,10 @@ class Peer:
         self.scroll_offset = 0
         #: copy-mode: text selection with the mouse or keyboard.
         self.copy = CopyMode()
+        #: The pane/window we were on before the current one, for tmux's
+        #: `last-pane` (Ctrl-B ;) and `last-window` (Ctrl-B l).
+        self.last_pane: Optional[str] = None
+        self.last_window_pane: Optional[str] = None
         #: Mouse reporting. OFF by default, exactly like tmux — that is what
         #: leaves the terminal's own selection (double-click, drag, right-click
         #: copy) working. Ctrl-B m turns it on.

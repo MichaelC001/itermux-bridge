@@ -77,6 +77,56 @@ class PrefixActions:
             if action == "zoom":
                 await self.api.zoom(session)
 
+            elif action == "new-window":
+                # A tmux window is an iTerm2 tab; follow it, as tmux does.
+                new = await self.api.new_window(session)
+                if new is not None:
+                    peer.iterm_session_id = new.session_id
+                    peer.copy.leave()
+                    peer.window_mode = False
+
+            elif action.startswith("select-window-"):
+                index = int(action.rsplit("-", 1)[1])
+                target = self._window_by_index(index)
+                if target is not None:
+                    await self.api.activate(target)
+                    peer.iterm_session_id = target.session_id
+                    peer.copy.leave()
+
+            elif action == "last-window":
+                target = self.api.pane(peer.last_window_pane)
+                if target is not None:
+                    await self.api.activate(target)
+                    peer.iterm_session_id = target.session_id
+                    peer.copy.leave()
+
+            elif action == "last-pane":
+                target = self.api.pane(peer.last_pane)
+                if target is not None:
+                    await self.api.activate(target)
+                    peer.iterm_session_id = target.session_id
+                    peer.copy.leave()
+
+            elif action.startswith("resize-"):
+                direction = {
+                    "resize-left": "left", "resize-right": "right",
+                    "resize-up": "above", "resize-down": "below",
+                }[action]
+                tab = self.api.tab_of(session.session_id)
+                await self.api.resize(tab, session, direction, amount=2)
+
+            elif action == "rename-window":
+                # Without a command prompt there's nothing to type a name into;
+                # say so rather than doing nothing.
+                peer.write_out(
+                    b"\r\n\033[33mitermux-bridge:\033[m rename from outside: "
+                    b"tmux -S <sock> rename-window <name>\r\n")
+
+            elif action == "break-pane":
+                peer.write_out(
+                    b"\r\n\033[33mitermux-bridge:\033[m break-pane isn't "
+                    b"supported (iTerm2 has no move-session-to-tab API).\r\n")
+
             elif action in ("split-horizontal", "split-vertical"):
                 new = await self.api.split(
                     session, vertical=(action == "split-vertical"))
@@ -108,6 +158,17 @@ class PrefixActions:
                     await self.api.activate(target)
                     peer.iterm_session_id = target.session_id
 
+            # Record where we came from so Ctrl-B ; (last-pane) and Ctrl-B l
+            # (last-window) have somewhere to go back to. Only when the action
+            # actually moved us, and never onto itself.
+            if peer.iterm_session_id != sid:
+                peer.last_pane = sid
+                old_tab = self.api.tab_of(sid)
+                new_tab = self.api.tab_of(peer.iterm_session_id)
+                if old_tab is not None and new_tab is not None and \
+                        old_tab.tab_id != new_tab.tab_id:
+                    peer.last_window_pane = sid
+
             await self.api.refresh()
             peer.scroll_offset = 0
             await self._paint(peer,
@@ -116,6 +177,17 @@ class PrefixActions:
         except Exception as e:
             log.warning("prefix %s failed: %s", action, e)
 
+
+    def _window_by_index(self, index: int):
+        """The active pane of window #index (tmux's Ctrl-B 0..9)."""
+        for _s, w, pane in self.mapper.flat_panes(self.app):
+            if w["index"] == index and pane["active"]:
+                return self.api.pane(pane["iterm_session_id"])
+        # No active pane recorded for it — fall back to its first pane.
+        for _s, w, pane in self.mapper.flat_panes(self.app):
+            if w["index"] == index:
+                return self.api.pane(pane["iterm_session_id"])
+        return None
 
     async def _pane_in_direction(self, session, action: str):
         """Resolve a select-* / next-pane action to the pane it means."""

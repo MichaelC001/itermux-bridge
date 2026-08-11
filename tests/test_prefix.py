@@ -115,7 +115,9 @@ print("\n=== pane bindings ===")
 
 for key, action in ((b"z", "zoom"), (b"o", "next-pane"), (b"x", "kill-pane"),
                     (b'"', "split-horizontal"), (b"%", "split-vertical"),
-                    (b"h", "select-left"), (b"l", "select-right")):
+                    (b"h", "select-left"), (b"j", "select-down"),
+                    (b"c", "new-window"), (b"l", "last-window"),
+                    (b";", "last-pane")):
     p = FakePeer()
     out = p._handle_prefix(PREFIX + key)
     check(f"Ctrl-B {key.decode('latin-1')} -> {action}",
@@ -127,6 +129,39 @@ p = FakePeer()
 out = p._handle_prefix(b"ab" + PREFIX + b"z" + b"cd")
 check("pane binding swallows the key, keeps surrounding text",
       out == b"abcd" and p.backend.actions == ["zoom"], f"({out!r})")
+
+# `l` is last-window in tmux, NOT "select right" — the arrow key does that.
+# Binding it to select-right would quietly break every tmux user's muscle memory.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"l")
+check("Ctrl-B l is last-window (as in tmux), not select-right",
+      p.backend.actions == ["last-window"], f"({p.backend.actions})")
+
+print("\n=== window shortcuts ===")
+
+for digit in (b"0", b"3", b"9"):
+    p = FakePeer()
+    p._handle_prefix(PREFIX + digit)
+    want = f"select-window-{digit.decode()}"
+    check(f"Ctrl-B {digit.decode()} -> {want}",
+          p.backend.actions == [want], f"({p.backend.actions})")
+
+print("\n=== resize (Ctrl+arrow) ===")
+
+for seq, action in ((b"\x1b[1;5A", "resize-up"), (b"\x1b[1;5B", "resize-down"),
+                    (b"\x1b[1;5C", "resize-right"), (b"\x1b[1;5D", "resize-left")):
+    p = FakePeer()
+    out = p._handle_prefix(PREFIX + seq)
+    check(f"Ctrl-B Ctrl+arrow -> {action}",
+          p.backend.actions == [action] and out == b"",
+          f"({p.backend.actions})")
+
+# Resizing is repeatable, so you can hold it.
+p = FakePeer()
+p._handle_prefix(PREFIX + b"\x1b[1;5C")
+p._handle_prefix(b"\x1b[1;5C")
+check("resize repeats without re-pressing the prefix",
+      p.backend.actions == ["resize-right"] * 2, f"({p.backend.actions})")
 
 print("\n=== arrow keys (multi-byte) ===")
 

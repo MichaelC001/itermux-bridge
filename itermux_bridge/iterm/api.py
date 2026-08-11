@@ -158,6 +158,66 @@ class ITermAPI:
         except Exception as e:
             log.warning("close pane failed: %s", e)
 
+    async def new_window(self, near_pane=None):
+        """New tmux window = new iTerm2 tab. Returns its active pane or None.
+
+        Created in the same iTerm2 window as `near_pane` so `Ctrl-B c` lands
+        where you're working, not in some other window.
+        """
+        target = None
+        if near_pane is not None:
+            for w in self.windows():
+                if any(s.session_id == near_pane.session_id
+                       for t in w.tabs for s in t.sessions):
+                    target = w
+                    break
+        if target is None:
+            target = self.app.current_terminal_window
+        if target is None:
+            return None
+        try:
+            tab = await target.async_create_tab()
+        except Exception as e:
+            log.warning("new tab failed: %s", e)
+            return None
+        return tab.current_session if tab else None
+
+    async def set_name(self, pane, name: str) -> None:
+        """Rename — tmux's rename-window maps to the tab's title."""
+        if pane is None:
+            return
+        try:
+            await pane.async_set_name(name)
+        except Exception as e:
+            log.warning("rename failed: %s", e)
+
+    async def resize(self, tab, pane, direction: str, amount: int = 1) -> None:
+        """Grow/shrink a pane, tmux's resize-pane.
+
+        iTerm2 has no per-pane resize call: you set `preferred_size` on the
+        sessions you want changed and then commit with async_update_layout().
+        """
+        if tab is None or pane is None:
+            return
+        try:
+            size = pane.preferred_size
+            w, h = int(size.width), int(size.height)
+        except Exception:
+            w, h = self.grid_size(pane)
+
+        if direction in ("left", "right"):
+            w = max(2, w + (amount if direction == "right" else -amount))
+        elif direction in ("above", "below"):
+            h = max(2, h + (amount if direction == "below" else -amount))
+        else:
+            return
+
+        try:
+            pane.preferred_size = iterm2.util.Size(w, h)
+            await tab.async_update_layout()
+        except Exception as e:
+            log.debug("resize failed: %s", e)
+
     async def zoom(self, pane) -> None:
         """Toggle 'Maximize Active Pane' for the pane's tab.
 

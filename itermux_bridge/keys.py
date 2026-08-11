@@ -20,17 +20,28 @@ PREFIX_KEYS = {
     b"x": "kill-pane",
     b'"': "split-horizontal",  # split into top/bottom
     b"%": "split-vertical",    # split into left/right
-    # vi-style pane selection, which tmux also accepts.
+    b"c": "new-window",        # the one everybody's fingers know
+    b"!": "break-pane",
+    b",": "rename-window",
+    # vi-style pane selection. NB: tmux binds `l` to last-window, not "right" —
+    # so right is the arrow key (or Ctrl-B Right), and `l` matches tmux.
     b"h": "select-left",
     b"j": "select-down",
     b"k": "select-up",
-    b"l": "select-right",
+    b";": "last-pane",
+    b"l": "last-window",
     b"[": "copy-mode",         # enter copy-mode, as in tmux
     b"]": "paste",
     b"m": "toggle-mouse",      # tmux's `set -g mouse on/off`
     # Window switching, as in tmux.
     b"n": "next-window",
     b"p": "previous-window",
+    # Ctrl-B 0..9 jumps straight to a window, as in tmux.
+    b"0": "select-window-0", b"1": "select-window-1",
+    b"2": "select-window-2", b"3": "select-window-3",
+    b"4": "select-window-4", b"5": "select-window-5",
+    b"6": "select-window-6", b"7": "select-window-7",
+    b"8": "select-window-8", b"9": "select-window-9",
     # Paging for keyboards with no PgUp/PgDn (MacBooks, most compact boards).
     # These reach the scrollback WITHOUT having to enter copy-mode first.
     # NB: tmux binds n/p to window switching, so paging uses u/e instead.
@@ -53,6 +64,12 @@ PREFIX_SEQS = {
     # otherwise reading a pane's history means Ctrl-B [ first, every time.
     b"\x1b[5~": "page-up",
     b"\x1b[6~": "page-down",
+    # Ctrl+arrow resizes the pane (tmux's C-Up/C-Down/C-Left/C-Right).
+    # xterm encodes the Ctrl modifier as parameter ";5".
+    b"\x1b[1;5A": "resize-up",
+    b"\x1b[1;5B": "resize-down",
+    b"\x1b[1;5C": "resize-right",
+    b"\x1b[1;5D": "resize-left",
 }
 
 #: Longest sequence we may need to accumulate before deciding.
@@ -64,6 +81,10 @@ MAX_SEQ = max(len(s) for s in PREFIX_SEQS)
 REPEATABLE = frozenset({
     "select-left", "select-right", "select-up", "select-down",
     "next-pane", "page-up", "page-down",
+    # tmux marks these `bind -r` too: resizing and walking windows are things
+    # you do several times in a row.
+    "resize-left", "resize-right", "resize-up", "resize-down",
+    "next-window", "previous-window",
 })
 
 #: How long the repeat window stays open after a repeatable action (seconds).

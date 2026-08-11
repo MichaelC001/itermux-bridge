@@ -102,9 +102,13 @@ prefix bindings, `send-keys`, `list-panes`, `list-windows`, `list-sessions`,
 | key | action | iTerm2 |
 |---|---|---|
 | `d` | detach | — |
+| `c` | new window | new iTerm2 tab (and follow it) |
 | `z` | zoom/unzoom the pane | Maximize Active Pane (a real toggle) |
 | `o` | next pane | activate the next split |
-| arrows, `h` `j` `k` `l` | select pane by direction | `select_pane_in_direction` |
+| arrows, `h` `j` `k` | select pane by direction | `select_pane_in_direction` |
+| `Ctrl`+arrows | resize the pane | `preferred_size` + `update_layout` |
+| `0`–`9` | jump to window N | activate that tab |
+| `l` / `;` | last window / last pane | — |
 | `"` / `%` | split horizontally / vertically | `async_split_pane` |
 | `x` | kill pane | close the split |
 | `PgUp` / `PgDn` | page through the pane's scrollback | — |
