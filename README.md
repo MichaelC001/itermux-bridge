@@ -9,6 +9,91 @@ tmux -S ~/.itermux/default.sock list-panes    # enumerate iTerm2 sessions as pan
 tmux -S ~/.itermux/default.sock send-keys -t %3 'ls' Enter
 ```
 
+## Why this exists
+
+**Reaching a Mac over SSH puts you in a different, more restricted world than
+sitting at it.** Everything you start from an SSH session inherits that world.
+This bridge lets you reach into the desktop session instead — you drive the
+terminals that are *already running there*, with the full privileges of a
+logged-in user.
+
+An SSH login is a **`Background`** session; the desktop is an **`Aqua`** session.
+Here is the same machine, same signing identity, same command — once over SSH,
+once sent through this bridge into a live iTerm2 pane:
+
+```console
+$ ssh mac 'launchctl managername'
+Background
+$ ssh mac 'codesign -s $IDENTITY /tmp/f'
+/tmp/f: errSecInternalComponent                    # ← signing fails
+
+$ tmux -S ~/.itermux/default.sock send-keys -t %3 \
+      'launchctl managername; codesign -s $IDENTITY /tmp/f' Enter
+Aqua
+rc=0                                               # ← signed, no prompt
+```
+
+The reason is the **login keychain**. It won't unlock for a `Background`
+session, so `security show-keychain-info` reports *"User interaction is not
+allowed"* over SSH while the desktop session reports `no-timeout`. Note that
+`security find-identity` still *lists* your certificates over SSH — it's using
+the **private key** that fails. That's why the failure surfaces as an opaque
+`errSecInternalComponent` rather than an obvious permission error.
+
+Anything that needs a stored credential inherits this: `codesign`,
+`xcodebuild` with a signing identity, notarization, tools reading tokens from
+the keychain.
+
+**How much else breaks depends on your machine.** TCC-protected resources
+(Screen Recording, Accessibility, Automation, Files & Folders) are granted per
+*application*, and a process spawned by `sshd` is not the app you granted them
+to — but if you've already given `sshd` Full Disk Access, much of that works
+over SSH too. Keychain is the one that stays broken regardless, because it's
+gated on the session type rather than on a permission you can grant.
+
+### The AI-coding-agent case
+
+This is what the project was actually built for. Agents like Claude Code, Codex
+and Gemini CLI are long-running processes that build, sign, run simulators and
+read credentials — and they run for hours, so a dropped SSH connection
+shouldn't kill them. Start one over plain SSH and the signing/keychain wall
+above is waiting for it, with an error message (`errSecInternalComponent`) that
+gives no hint about the real cause.
+
+Start them in iTerm2 on the Mac itself — where they have a real desktop session —
+and then **attach from anywhere with a normal `tmux` client**. Detaching (or
+losing the connection) closes only your view: the agent is a process inside
+iTerm2, so it keeps running there with full desktop privileges, and you
+reattach to find it where you left it.
+
+```bash
+ssh mac                                        # from your laptop, phone, iPad…
+tmux -S ~/.itermux/default.sock a -t %3        # attach to the agent's pane
+# Ctrl-B d to detach; it keeps running with desktop privileges
+```
+
+You get tmux's ergonomics (detach/reattach, pane navigation, scrollback,
+copy-mode) over sessions that were never started by tmux and don't know it
+exists.
+
+### Other things it's good for
+
+- **Watching a long build or test run** from another machine without leaving a
+  terminal open on the Mac.
+- **Scripting iTerm2** from a shell: `list-panes` to find the pane running a
+  given command, `send-keys` to drive it.
+- **Pairing / demoing** — several clients can attach at once.
+
+### What this requires of you
+
+The Mac has to be **logged in with iTerm2 running** — that desktop session is
+the whole point, and the bridge can only project sessions that already exist.
+If iTerm2 quits, your attached clients drop with it. So this complements SSH
+rather than replacing it: SSH to get onto the machine, the bridge to reach the
+desktop session once you're there.
+
+## How it works
+
 It is not tmux and does not wrap tmux. It's a Python server that implements
 tmux's client↔server wire protocol (imsg framing over a Unix socket, with
 `SCM_RIGHTS` fd passing) and maps it onto iTerm2's Python API.
