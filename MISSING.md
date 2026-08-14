@@ -19,7 +19,13 @@
 | `C-b` | `send-prefix` | 发送字面前缀 |
 
 命令:`attach` `ls` `list-windows` `list-panes` `send-keys` `has-session`
-`detach-client` `select-window`/`next-window`/`previous-window` `display-message`
+`new-session`(`-d` / `-s <name>`)`detach-client`
+`select-window`/`next-window`/`previous-window` `display-message`
+
+**`new-session` 曾经是个 bug**:它被放在 `ATTACH_CMDS` 里,所以既不创建
+也不报错,只是静默 attach 到一个已有的 pane。现在它真的会新建一个 iTerm2
+window(`Window.async_create`)。注意与 `kill-*` 的**不对称**是有意的:
+创建是用户显式请求的,销毁则会毁掉桥并不拥有的终端。
 
 ---
 

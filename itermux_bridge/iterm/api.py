@@ -182,6 +182,22 @@ class ITermAPI:
             return None
         return tab.current_session if tab else None
 
+    async def new_terminal_window(self):
+        """New tmux session = new iTerm2 window. Returns its pane or None.
+
+        Distinct from new_window(), which creates a *tab* inside an existing
+        window (tmux's new-window / Ctrl-B c).
+        """
+        try:
+            window = await iterm2.Window.async_create(self.connection)
+        except Exception as e:
+            log.warning("new terminal window failed: %s", e)
+            return None
+        if window is None:
+            return None
+        tab = window.current_tab
+        return tab.current_session if tab else None
+
     async def set_name(self, pane, name: str) -> None:
         """Rename — tmux's rename-window maps to the tab's title."""
         if pane is None:

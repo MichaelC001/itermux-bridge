@@ -219,8 +219,22 @@ it list-panes -a && it a -t %8
 
 Attach/detach, live screen streaming, keyboard input, mouse (wheel/click/drag),
 prefix bindings, `send-keys`, `list-panes`, `list-windows`, `list-sessions`,
-`has-session`, `detach-client`, `select-window` / `next-window` /
+`has-session`, `new-session`, `detach-client`, `select-window` / `next-window` /
 `previous-window`, `display-message`.
+
+**Creating things.** `new-session` opens a new iTerm2 **window** and attaches to
+it — useful when you SSH in and there's no pane worth taking over yet. `-d`
+leaves it running on the Mac without attaching, and `-s <name>` titles it.
+Inside an attached client, `Ctrl-B c` creates a **window** (an iTerm2 tab).
+
+```bash
+it new -d -s build        # open a window on the Mac, don't attach
+it new                    # open one and attach to it
+```
+
+Note the asymmetry with killing: the bridge creates windows on request but
+refuses to destroy them, because it doesn't own the lifetime of terminals it
+didn't start.
 
 **Prefix bindings** (`Ctrl-B`), mapped onto the equivalent iTerm2 operation:
 
@@ -372,6 +386,7 @@ for t in tests/test_*.py; do .venv/bin/python "$t" || break; done
 | `test_prefix.py` | prefix state machine: split reads, `bind -r` repeat |
 | `test_mouse.py` | SGR 1006 decoding, wheel/drag |
 | `test_copymode.py` | selection, pane bounds, scrollback paging |
+| `test_newsession.py` | `new-session` creates a window instead of attaching |
 
 The first two drive the **actual `tmux` binary** against the bridge over a PTY —
 they fail if the wire format is wrong. The rest are pure-logic tests with no

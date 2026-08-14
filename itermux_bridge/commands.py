@@ -41,6 +41,16 @@ def _reply(peer, text: str, status: int = 0) -> None:
     peer.detach(status=status)
 
 
+def _flag_value(argv, flag: str):
+    """The value following `flag` in argv, or None if absent/trailing."""
+    for i, a in enumerate(argv):
+        if a == flag:
+            return argv[i + 1] if i + 1 < len(argv) else None
+        if a.startswith(flag) and len(a) > len(flag):
+            return a[len(flag):]          # tmux also accepts -sname
+    return None
+
+
 #: `-t` was not given at all (distinct from "given but unresolvable").
 NO_TARGET = object()
 
@@ -168,6 +178,34 @@ async def _activate(backend, peer, session):
     await backend._paint(peer, session)
 
 
+async def _new_session(backend, peer, detached: bool, name):
+    """new-session: open an iTerm2 window, then attach unless -d."""
+    pane = await backend.api.new_terminal_window()
+    if pane is None:
+        _reply(peer, "itermux-bridge: could not create an iTerm2 window\n",
+               status=1)
+        return
+
+    if name:
+        await backend.api.set_name(pane, name)
+
+    # Let the mapper see the new window so it gets its $N/@N/%N before we
+    # report or render it.
+    await backend.api.refresh()
+
+    if detached:
+        # `-d` prints the new session like tmux and exits, leaving the window
+        # open on the Mac — the remote-kickoff case.
+        tree = backend.mapper.inventory(backend.app)
+        ids = [s["id"] for s in tree
+               if any(p["iterm_session_id"] == pane.session_id
+                      for w in s["windows"] for p in w["panes"])]
+        _reply(peer, f"${ids[0]}: 1 windows\n" if ids else "")
+        return
+
+    peer.attach(session_id=pane.session_id)
+
+
 def _sessions_for(tree, target):
     """The session(s) a session-scoped command should act on.
 
@@ -197,9 +235,11 @@ def _int(s: str):
 
 
 #: Commands that put the client on a terminal instead of printing and exiting.
+#: NB: `new-session` is deliberately NOT here. A tmux session is an iTerm2
+#: window, which the bridge projects rather than creates — treating it as an
+#: attach silently connected the client to an existing pane instead.
 ATTACH_CMDS = frozenset({
     "attach", "attach-session", "a", "at",
-    "new", "new-session",
 })
 
 
@@ -354,6 +394,16 @@ def dispatch(backend, peer, argv) -> None:
             return
         backend._spawn(_activate(backend, peer, session), "select-window")
         _reply(peer, "")
+
+    elif cmd in ("new", "new-session"):
+        # A tmux session is an iTerm2 window, so this really does open one.
+        # Unlike attach it can't be decided synchronously — the window has to
+        # exist before we know which pane to attach to — so the whole thing
+        # runs on the backend's loop.
+        detached = "-d" in args
+        name = _flag_value(args, "-s")
+        backend._spawn(_new_session(backend, peer, detached, name),
+                       "new-session")
 
     elif cmd in ("kill-server", "kill-session", "kill-window"):
         # We don't own the iTerm2 sessions' lifetimes — killing them would
