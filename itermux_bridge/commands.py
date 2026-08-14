@@ -41,6 +41,28 @@ def _reply(peer, text: str, status: int = 0) -> None:
     peer.detach(status=status)
 
 
+def _strip_flags(argv, c_value):
+    """Drop split-window's own flags, leaving the trailing shell-command.
+
+    `-t` is already gone (_target_pane removed it); without this the rest of
+    the flags get TYPED INTO the new pane as if they were a command.
+    """
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in ("-h", "-v", "-P", "-d", "-b", "-f", "-I"):
+            continue
+        if a == "-c":
+            skip = True                   # its value follows
+            continue
+        if a.startswith("-c") and c_value and a == f"-c{c_value}":
+            continue                      # glued form
+        out.append(a)
+    return out
+
+
 def _flag_value(argv, flag: str):
     """The value following `flag` in argv, or None if absent/trailing."""
     for i, a in enumerate(argv):
@@ -202,6 +224,29 @@ async def _new_session(backend, peer, detached: bool, name, printed: bool):
         return
 
     peer.attach(session_id=pane.session_id)
+
+
+async def _split(backend, peer, session, horizontal: bool, start_dir,
+                 printed: bool, argv) -> None:
+    """split-window: divide a pane, optionally cd'ing and running a command."""
+    # iTerm2's `vertical` means "a vertical DIVIDER" (side by side), which is
+    # tmux's -h. Same convention as the Ctrl-B % / " bindings.
+    pane = await backend.api.split(session, vertical=horizontal)
+    if pane is None:
+        _reply(peer, "itermux-bridge: could not split the pane\n", status=1)
+        return
+
+    # -c and a trailing shell-command are what make scripted layouts useful;
+    # iTerm2 gives no way to set either at creation, so type them into the new
+    # pane instead. Quote the path so spaces can't split it into two words.
+    if start_dir:
+        await backend.api.send_text(pane, f"cd {shlex.quote(start_dir)}\n")
+    if argv:
+        await backend.api.send_text(pane, " ".join(argv) + "\n")
+
+    await backend.api.refresh()
+    _reply(peer, f"%{backend.mapper.pane_id(pane.session_id)}\n"
+           if printed else "")
 
 
 def _session_name(backend, pane) -> str:
@@ -424,6 +469,23 @@ def dispatch(backend, peer, argv) -> None:
             _new_session(backend, peer, detached="-d" in args,
                          name=_flag_value(args, "-s"), printed="-P" in args),
             "new-session")
+
+    elif cmd in ("split-window", "splitw"):
+        # tmux: -h splits left/right, -v (the default) top/bottom. iTerm2's
+        # async_split_pane takes vertical=True for a LEFT/RIGHT split, which is
+        # the opposite sense — mapping it wrong silently transposes layouts.
+        target, rest = _target_pane(args)
+        session = (resolve_target(mapper, app, target)
+                   if target is not NO_TARGET else mapper.focused_session(app))
+        if session is None:
+            _reply(peer, f"can't find pane: {target}\n", status=1)
+            return
+        start_dir = _flag_value(args, "-c")
+        backend._spawn(
+            _split(backend, peer, session, horizontal="-h" in args,
+                   start_dir=start_dir, printed="-P" in args,
+                   argv=_strip_flags(rest, start_dir)),
+            "split-window")
 
     elif cmd in ("kill-server", "kill-session", "kill-window"):
         # We don't own the iTerm2 sessions' lifetimes — killing them would

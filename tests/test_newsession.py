@@ -35,6 +35,8 @@ class FakeAPI:
         self.created = 0
         self.named = None
         self.refreshed = 0
+        self.split_vertical = None
+        self.sent = []
 
     async def new_terminal_window(self):
         self.created += 1
@@ -46,8 +48,24 @@ class FakeAPI:
     async def refresh(self):
         self.refreshed += 1
 
+    async def split(self, pane, vertical):
+        self.split_vertical = vertical
+        return FakePane("split-pane")
+
+    async def send_text(self, pane, text):
+        self.sent.append(text)
+
 
 class FakeMapper:
+    def pane_id(self, session_id):
+        return 12
+
+    def focused_session(self, app):
+        return FakePane("focused")
+
+    def find_session(self, app, pane):
+        return FakePane(f"pane-{pane}")
+
     def inventory(self, app):
         return [{
             "id": 4, "windows": [{
@@ -160,6 +178,38 @@ async def main():
     _peer, api = await run(["new", "-d", "-P", "-sx"])
     check("supported flags aren't mistaken for unsupported ones",
           api.created == 1, f"(created={api.created})")
+
+    # --- split-window ---------------------------------------------------
+    # tmux -h = left/right; iTerm2's async_split_pane(vertical=True) is ALSO
+    # left/right, so -h must map to vertical=True. Getting this backwards
+    # transposes every scripted layout.
+    peer, api = await run(["split-window", "-h", "-t", "%1"])
+    check("-h splits left/right (vertical=True)", api.split_vertical is True,
+          f"({api.split_vertical})")
+    peer, api = await run(["split-window", "-t", "%1"])
+    check("no flag = tmux's -v, top/bottom", api.split_vertical is False,
+          f"({api.split_vertical})")
+
+    peer, api = await run(["split-window", "-t", "%1", "-c", "/tmp/x"])
+    # Exactly one line: the cd. The flags must NOT be typed into the pane as
+    # if they were a shell command — _target_pane only strips -t.
+    check("-c cd's the new pane", api.sent == ["cd /tmp/x\n"], f"({api.sent})")
+    peer, api = await run(["split-window", "-t", "%1", "-c", "/a b"])
+    check("-c quotes paths with spaces", api.sent == ["cd '/a b'\n"],
+          f"({api.sent})")
+    peer, api = await run(["split-window", "-h", "-P", "-t", "%1"])
+    check("bare flags are never typed into the pane", api.sent == [],
+          f"({api.sent})")
+    # tmux runs a trailing shell-command in the new pane.
+    peer, api = await run(["split-window", "-t", "%1", "-c", "/tmp", "htop"])
+    check("trailing command still runs after the cd",
+          api.sent == ["cd /tmp\n", "htop\n"], f"({api.sent})")
+
+    peer, api = await run(["split-window", "-t", "%1", "-P"])
+    check("-P prints the new pane id", peer.text.strip() == "%12",
+          f"({peer.text.strip()!r})")
+    peer, api = await run(["split-window", "-t", "%1"])
+    check("no -P prints nothing", peer.text == "", f"({peer.text!r})")
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
     return 0 if ok else 1
