@@ -168,8 +168,8 @@ def cmd_doctor(args) -> int:
     if tmux:
         ver = subprocess.run([tmux, "-V"], capture_output=True, text=True)
         v = ver.stdout.strip()
-        # We speak PROTOCOL_VERSION 8, which covers tmux 3.x.
-        print(f"     {v} (bridge speaks protocol version 8)")
+        # We implement PROTOCOL_VERSION 8, which covers tmux 3.x.
+        print(f"     {v} (bridge implements protocol version 8)")
 
     check("installed as AutoLaunch script", SCRIPT_DIR.exists(),
           "run: itermux-bridge install")

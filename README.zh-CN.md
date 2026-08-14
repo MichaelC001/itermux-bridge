@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-用**真正的 tmux 协议**对话 **iTerm2**。把原生 `tmux` 客户端 attach 到一个活着的
+把 **iTerm2** 桥接进**真正的 tmux 协议**。把原生 `tmux` 客户端 attach 到一个活着的
 iTerm2 session，或者用 `tmux send-keys` / `list-panes` 驱动 iTerm2。
 
 ![随时随地续上你的 iTerm2 AI session：一个四分屏的 iTerm2 窗口，被镜像到笔记本和手机上的 tmux 客户端](docs/hero.jpg)

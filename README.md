@@ -2,8 +2,8 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-Speak the **real tmux protocol** to **iTerm2**. Attach a stock `tmux` client to a
-live iTerm2 session, or drive iTerm2 with `tmux send-keys` / `list-panes`.
+Bridge **iTerm2** into the **real tmux protocol**. Attach a stock `tmux` client to
+a live iTerm2 session, or drive iTerm2 with `tmux send-keys` / `list-panes`.
 
 ![Continue your iTerm2 AI session, anywhere: a four-pane iTerm2 window mirrored into a tmux client on a laptop and a phone](docs/hero.jpg)
 
