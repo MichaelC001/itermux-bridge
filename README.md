@@ -255,11 +255,17 @@ Careful, if you turn it on: iTerm2 reports `mouseReportingMode = **-1**` when
 reporting is off, not `0` — a truthiness check treats that as "enabled" and
 silently breaks scrollback.
 
-Not implemented: control mode (`-CC`), `.tmux.conf` parsing, `resize-pane`,
-`rename-window`. Killing sessions is deliberately refused — the bridge doesn't
-own those terminals' lifetimes, so `kill-session` detaches instead. The client's
+Not implemented: control mode (`-CC`), `.tmux.conf` parsing, the command prompt
+(`Ctrl-B :`) and the `choose-*` pickers (`Ctrl-B s` / `w`), preset layouts
+(`Ctrl-B space`). `rename-window` and `break-pane` are bound but report why they
+can't run: the first needs a command prompt to type into, the second has no
+iTerm2 API. Killing sessions is deliberately refused — the bridge doesn't own
+those terminals' lifetimes, so `kill-session` detaches instead. The client's
 terminal does the drawing (normal mode, not control mode), so any tmux version
 on any terminal works.
+
+See [MISSING.md](MISSING.md) for the full gap analysis against tmux's default
+binding table, and [ARCHITECTURE.md](ARCHITECTURE.md) for the layer split.
 
 ## Protocol notes
 
@@ -312,11 +318,24 @@ tmux 3.7b source and a live client:
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_handshake.py    # real tmux binary: handshake, fds, detach
-.venv/bin/python tests/test_command.py      # one-shot command clients
-.venv/bin/python tests/test_ansi.py         # CellStyle -> SGR re-encoding
-.venv/bin/python tests/test_live_iterm.py   # live attach (needs iTerm2 + bridge)
+for t in tests/test_*.py; do .venv/bin/python "$t" || break; done
 ```
 
+| | |
+|---|---|
+| `test_handshake.py` | real tmux binary: handshake, fd passing, detach |
+| `test_command.py` | one-shot command clients, target resolution |
+| `test_codec_limits.py` | imsg framing: `IMSG_FD_MARK`, oversize frames, fd leaks |
+| `test_ansi.py` | `CellStyle` → SGR re-encoding, CJK cell widths |
+| `test_layout.py` | split-tree → grid rectangles, dividers |
+| `test_mapper.py` | iTerm2 objects → `$N`/`@N`/`%N`, id persistence |
+| `test_prefix.py` | prefix state machine: split reads, `bind -r` repeat |
+| `test_mouse.py` | SGR 1006 decoding, wheel/drag |
+| `test_copymode.py` | selection, pane bounds, scrollback paging |
+
 The first two drive the **actual `tmux` binary** against the bridge over a PTY —
-they fail if the wire format is wrong.
+they fail if the wire format is wrong. The rest are pure-logic tests with no
+iTerm2 and no sockets, which is what the layer split buys you.
+
+`tests/test_live_iterm.py` is separate: it needs a real iTerm2 with the bridge
+running, so it isn't part of the sweep above.
