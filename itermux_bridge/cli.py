@@ -69,12 +69,32 @@ main()
 """
 
 
+def _can_import_iterm2(python: Path) -> bool:
+    """Can `python` import iterm2? Asked by running it, not by guessing."""
+    try:
+        r = subprocess.run([str(python), "-c", "import iterm2"],
+                           capture_output=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def cmd_install(args) -> int:
+    # The directory our package sits in — a git checkout, or Homebrew's
+    # libexec/.../site-packages. Either way it is what has to go on sys.path.
     repo = Path(__file__).resolve().parent.parent
 
-    # Prefer the repo venv (it has `iterm2`); fall back to whatever is running us.
+    # The interpreter that can `import iterm2`. In a git checkout that is the
+    # repo venv; under Homebrew it is the libexec venv already running us, and
+    # sys.executable is correct. Verify rather than assume, so a broken install
+    # is caught here instead of silently producing a launcher that can't start.
     venv_python = repo / ".venv" / "bin" / "python3"
     python = venv_python if venv_python.exists() else Path(sys.executable)
+    if not _can_import_iterm2(python):
+        print(f"❌ {python} cannot import `iterm2`.")
+        print("   In a git checkout: python3 -m venv .venv && "
+              ".venv/bin/pip install iterm2")
+        return 1
 
     SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     launcher = SCRIPT_DIR / "itermux_bridge.py"
