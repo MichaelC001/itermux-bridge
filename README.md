@@ -5,6 +5,8 @@
 Speak the **real tmux protocol** to **iTerm2**. Attach a stock `tmux` client to a
 live iTerm2 session, or drive iTerm2 with `tmux send-keys` / `list-panes`.
 
+![Continue your iTerm2 AI session, anywhere: a four-pane iTerm2 window mirrored into a tmux client on a laptop and a phone](docs/hero.jpg)
+
 ```bash
 tmux -S ~/.itermux/default.sock attach        # see & type into an iTerm2 session
 tmux -S ~/.itermux/default.sock list-panes    # enumerate iTerm2 sessions as panes
