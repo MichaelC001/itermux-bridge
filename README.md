@@ -176,10 +176,25 @@ Indices (the `0:` / `7.1` columns) are positional, like tmux's.
 ## Install
 
 ```bash
+brew tap wsvn53/itermux
+brew trust wsvn53/itermux     # Homebrew 4.6+ requires this for third-party taps
+brew install itermux-bridge
+
+itermux-bridge install        # register the iTerm2 AutoLaunch script
+itermux-bridge doctor
+```
+
+<details>
+<summary>From a git checkout instead</summary>
+
+```bash
+git clone https://github.com/wsvn53/itermux-bridge && cd itermux-bridge
 python3 -m venv .venv && .venv/bin/pip install iterm2
 .venv/bin/python -m itermux_bridge.cli install
 .venv/bin/python -m itermux_bridge.cli doctor
 ```
+
+</details>
 
 Enable **iTerm2 → Settings → General → Magic → Python API**, then restart iTerm2.
 The bridge runs as an AutoLaunch script, so it lives exactly as long as iTerm2 does.

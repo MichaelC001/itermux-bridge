@@ -164,10 +164,25 @@ ID（`$N`/`@N`/`%N`）在第一次见到时分配，并持久化到 `~/.itermux/
 ## 安装
 
 ```bash
+brew tap wsvn53/itermux
+brew trust wsvn53/itermux     # Homebrew 4.6+ 对第三方 tap 要求这一步
+brew install itermux-bridge
+
+itermux-bridge install        # 注册 iTerm2 AutoLaunch 脚本
+itermux-bridge doctor
+```
+
+<details>
+<summary>或者从 git 源码安装</summary>
+
+```bash
+git clone https://github.com/wsvn53/itermux-bridge && cd itermux-bridge
 python3 -m venv .venv && .venv/bin/pip install iterm2
 .venv/bin/python -m itermux_bridge.cli install
 .venv/bin/python -m itermux_bridge.cli doctor
 ```
+
+</details>
 
 打开 **iTerm2 → Settings → General → Magic → Python API**，然后重启 iTerm2。
 bridge 作为 AutoLaunch 脚本运行，所以它的生命周期和 iTerm2 完全一致。
