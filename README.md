@@ -223,14 +223,20 @@ prefix bindings, `send-keys`, `list-panes`, `list-windows`, `list-sessions`,
 `previous-window`, `display-message`.
 
 **Creating things.** `new-session` opens a new iTerm2 **window** and attaches to
-it — useful when you SSH in and there's no pane worth taking over yet. `-d`
-leaves it running on the Mac without attaching, and `-s <name>` titles it.
-Inside an attached client, `Ctrl-B c` creates a **window** (an iTerm2 tab).
+it — useful when you SSH in and there's no pane worth taking over yet. Inside an
+attached client, `Ctrl-B c` creates a **window** (an iTerm2 tab).
 
 ```bash
-it new -d -s build        # open a window on the Mac, don't attach
-it new                    # open one and attach to it
+it new                    # open a window and attach to it
+it new -d -s build        # open one on the Mac, don't attach
+id=$(it new -d -P)        # ...and capture its id, as in tmux
 ```
+
+Of tmux's flags it takes `-d`, `-s <name>` and `-P` (`-d` alone prints nothing,
+exactly like tmux). The rest — `-c`, `-x`/`-y`, `-n`, `-A`, `-e`, `-E` — are
+**refused with an error** rather than ignored, since iTerm2 opens the window
+from your default profile and a silently-ignored `-c /path` would leave you in
+the wrong directory believing otherwise.
 
 Note the asymmetry with killing: the bridge creates windows on request but
 refuses to destroy them, because it doesn't own the lifetime of terminals it

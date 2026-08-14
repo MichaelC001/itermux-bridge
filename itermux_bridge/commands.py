@@ -178,7 +178,7 @@ async def _activate(backend, peer, session):
     await backend._paint(peer, session)
 
 
-async def _new_session(backend, peer, detached: bool, name):
+async def _new_session(backend, peer, detached: bool, name, printed: bool):
     """new-session: open an iTerm2 window, then attach unless -d."""
     pane = await backend.api.new_terminal_window()
     if pane is None:
@@ -194,16 +194,23 @@ async def _new_session(backend, peer, detached: bool, name):
     await backend.api.refresh()
 
     if detached:
-        # `-d` prints the new session like tmux and exits, leaving the window
-        # open on the Mac — the remote-kickoff case.
-        tree = backend.mapper.inventory(backend.app)
-        ids = [s["id"] for s in tree
-               if any(p["iterm_session_id"] == pane.session_id
-                      for w in s["windows"] for p in w["panes"])]
-        _reply(peer, f"${ids[0]}: 1 windows\n" if ids else "")
+        # tmux is SILENT here unless -P is given; scripts parse that output, so
+        # printing unasked would break `id=$(tmux new -d -P)`. -P's default
+        # format is '#{session_name}:'.
+        _reply(peer, f"{name or _session_name(backend, pane)}:\n"
+               if printed else "")
         return
 
     peer.attach(session_id=pane.session_id)
+
+
+def _session_name(backend, pane) -> str:
+    """The `$N` the mapper gave the window holding `pane` (tmux's default name)."""
+    for s in backend.mapper.inventory(backend.app):
+        if any(p["iterm_session_id"] == pane.session_id
+               for w in s["windows"] for p in w["panes"]):
+            return str(s["id"])
+    return ""
 
 
 def _sessions_for(tree, target):
@@ -400,10 +407,23 @@ def dispatch(backend, peer, argv) -> None:
         # Unlike attach it can't be decided synchronously — the window has to
         # exist before we know which pane to attach to — so the whole thing
         # runs on the backend's loop.
-        detached = "-d" in args
-        name = _flag_value(args, "-s")
-        backend._spawn(_new_session(backend, peer, detached, name),
-                       "new-session")
+        # Flags tmux takes that we can't honour. Ignoring them silently would
+        # be worse than refusing: `new -c /path` looks like it worked and puts
+        # you in the wrong directory.
+        unsupported = [f for f in ("-c", "-e", "-x", "-y", "-n", "-A", "-E",
+                                   "-D", "-X", "-f")
+                       if f in args or any(a.startswith(f) and len(a) > 2
+                                           for a in args if a.startswith("-"))]
+        if unsupported:
+            _reply(peer, f"itermux-bridge: new-session {' '.join(unsupported)}"
+                         " not supported (iTerm2 opens the window with your "
+                         "default profile)\n", status=1)
+            return
+
+        backend._spawn(
+            _new_session(backend, peer, detached="-d" in args,
+                         name=_flag_value(args, "-s"), printed="-P" in args),
+            "new-session")
 
     elif cmd in ("kill-server", "kill-session", "kill-window"):
         # We don't own the iTerm2 sessions' lifetimes — killing them would

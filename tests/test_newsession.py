@@ -110,14 +110,23 @@ async def main():
     check("client was not detached", peer.status is None)
     check("mapper saw the window before we used it", api.refreshed == 1)
 
-    # -d: create and report, leaving the window open on the Mac.
+    # -d: create and leave it running on the Mac.
     peer, api = await run(["new-session", "-d"])
     check("-d still created the window", api.created == 1)
     check("-d did NOT attach", peer.attached_to == "NOT-CALLED",
           f"({peer.attached_to!r})")
-    check("-d printed the new session id", "$4:" in peer.text,
-          f"({peer.text.strip()!r})")
     check("-d exited 0", peer.status == 0, f"(status={peer.status})")
+    # Real tmux prints NOTHING without -P; scripts do `id=$(tmux new -d -P)`,
+    # so unasked-for output would corrupt the value they capture.
+    check("-d alone prints nothing, as tmux does", peer.text == "",
+          f"({peer.text!r})")
+
+    peer, _api = await run(["new-session", "-d", "-P"])
+    check("-P prints '<name>:' (tmux's default format)",
+          peer.text.strip() == "4:", f"({peer.text.strip()!r})")
+    peer, _api = await run(["new-session", "-d", "-P", "-s", "build"])
+    check("-P uses the -s name when given", peer.text.strip() == "build:",
+          f"({peer.text.strip()!r})")
 
     # -s <name> names the window; tmux also accepts the value glued on.
     _peer, api = await run(["new-session", "-d", "-s", "build"])
@@ -139,6 +148,18 @@ async def main():
     peer, api = await run(["new"])
     check("`new` alias creates too", api.created == 1 and
           peer.attached_to == "new-pane")
+
+    # Flags tmux accepts but iTerm2 can't honour must be REFUSED, not ignored:
+    # `new -c /path` that silently lands elsewhere is worse than an error.
+    peer, api = await run(["new", "-c", "/tmp"])
+    check("-c is refused, not ignored", peer.status == 1 and api.created == 0,
+          f"(status={peer.status}, created={api.created})")
+    check("refusal names the flag", "-c" in peer.text,
+          f"({peer.text.strip()!r})")
+    # ...but the supported flags must not trip that check.
+    _peer, api = await run(["new", "-d", "-P", "-sx"])
+    check("supported flags aren't mistaken for unsupported ones",
+          api.created == 1, f"(created={api.created})")
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
     return 0 if ok else 1
