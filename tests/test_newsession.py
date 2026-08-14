@@ -37,6 +37,8 @@ class FakeAPI:
         self.refreshed = 0
         self.split_vertical = None
         self.sent = []
+        self.tabs = 0
+        self.near = None
 
     async def new_terminal_window(self):
         self.created += 1
@@ -47,6 +49,11 @@ class FakeAPI:
 
     async def refresh(self):
         self.refreshed += 1
+
+    async def new_window(self, near_pane=None):
+        self.tabs += 1
+        self.near = near_pane
+        return self.pane
 
     async def split(self, pane, vertical):
         self.split_vertical = vertical
@@ -66,10 +73,21 @@ class FakeMapper:
     def find_session(self, app, pane):
         return FakePane(f"pane-{pane}")
 
+    def flat_panes(self, app):
+        for sess in self.inventory(app):
+            for win in sess["windows"]:
+                for pane in win["panes"]:
+                    yield sess, win, pane
+
     def inventory(self, app):
         return [{
             "id": 4, "windows": [{
-                "id": 9, "panes": [{"id": 12, "iterm_session_id": "new-pane"}],
+                "id": 9, "index": 1, "panes": [
+                    {"id": 12, "index": 0, "active": True,
+                     "iterm_session_id": "new-pane"},
+                    {"id": 13, "index": 1, "active": False,
+                     "iterm_session_id": "split-pane"},
+                ],
             }],
         }]
 
@@ -94,9 +112,14 @@ class FakePeer:
         return bytes(self.out).decode()
 
 
+class FakeApp:
+    def get_session_by_id(self, sid):
+        return FakePane(sid)
+
+
 class FakeBackend:
     def __init__(self, api):
-        self.api, self.app, self.mapper = api, object(), FakeMapper()
+        self.api, self.app, self.mapper = api, FakeApp(), FakeMapper()
         self.spawned = []
 
     def _spawn(self, coro, what):
@@ -206,10 +229,42 @@ async def main():
           api.sent == ["cd /tmp\n", "htop\n"], f"({api.sent})")
 
     peer, api = await run(["split-window", "-t", "%1", "-P"])
-    check("-P prints the new pane id", peer.text.strip() == "%12",
+    # Verified against tmux 3.7b: -P prints `session:window.pane`, NOT %N.
+    # Scripts feed it straight back as a -t target, so the raw id is wrong.
+    check("-P prints session:window.pane", peer.text.strip() == "4:1.1",
           f"({peer.text.strip()!r})")
     peer, api = await run(["split-window", "-t", "%1"])
     check("no -P prints nothing", peer.text == "", f"({peer.text!r})")
+
+    # --- new-window -------------------------------------------------------
+    peer, api = await run(["new-window", "-t", "$4"])
+    check("new-window created a tab", api.tabs == 1, f"({api.tabs})")
+    check("...next to the target pane", api.near is not None)
+    check("no -P prints nothing", peer.text == "", f"({peer.text!r})")
+
+    peer, api = await run(["new-window", "-P"])
+    check("new-window -P prints session:window.pane",
+          peer.text.strip() == "4:1.0", f"({peer.text.strip()!r})")
+
+    peer, api = await run(["new-window", "-n", "build", "-c", "/tmp/x"])
+    check("-n names the tab", api.named == ("new-pane", "build"),
+          f"({api.named})")
+    # -n takes a VALUE; if it isn't stripped the name gets typed into the pane.
+    check("-n's value is not typed into the pane",
+          api.sent == ["cd /tmp/x\n"], f"({api.sent})")
+
+    peer, api = await run(["new-window"], pane=None)
+    check("tab-creation failure is reported", "could not create" in peer.text
+          and peer.status == 1, f"({peer.text.strip()!r})")
+
+    # A bare `$N` (session, no :window.pane) has to resolve — it's the natural
+    # way to say `new-window -t $0`. It previously fell through to None.
+    m, app = FakeMapper(), FakeApp()
+    check("bare $N resolves to the session's active pane",
+          getattr(commands.resolve_target(m, app, "$4"), "session_id", None)
+          == "new-pane")
+    check("unknown $N still resolves to nothing",
+          commands.resolve_target(m, app, "$99") is None)
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
     return 0 if ok else 1

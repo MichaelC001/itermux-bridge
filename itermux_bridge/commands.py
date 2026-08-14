@@ -41,6 +41,17 @@ def _reply(peer, text: str, status: int = 0) -> None:
     peer.detach(status=status)
 
 
+def _target_spec(backend, pane) -> str:
+    """tmux's default -P format: `session:window.pane` (verified against 3.7b).
+
+    NOT the raw %N id — scripts feed this straight back in as a -t target.
+    """
+    for sess, win, p in backend.mapper.flat_panes(backend.app):
+        if p["iterm_session_id"] == pane.session_id:
+            return f"{sess['id']}:{win['index']}.{p['index']}"
+    return ""
+
+
 def _strip_flags(argv, c_value):
     """Drop split-window's own flags, leaving the trailing shell-command.
 
@@ -54,10 +65,10 @@ def _strip_flags(argv, c_value):
             continue
         if a in ("-h", "-v", "-P", "-d", "-b", "-f", "-I"):
             continue
-        if a == "-c":
+        if a in ("-c", "-n"):
             skip = True                   # its value follows
             continue
-        if a.startswith("-c") and c_value and a == f"-c{c_value}":
+        if c_value and a == f"-c{c_value}":
             continue                      # glued form
         out.append(a)
     return out
@@ -111,6 +122,18 @@ def resolve_target(mapper, app, target: str):
         0           bare number -> pane id (what our list-panes prints)
     """
     t = target.strip()
+
+    # A bare `$N` names a SESSION with no window/pane part — `new-window -t $0`
+    # is the natural way to say "a tab in that iTerm2 window". Resolve it to
+    # the session's active pane, which is what tmux does.
+    if t.startswith("$") and ":" not in t:
+        sid = _int(t[1:])
+        panes = [(s, w, p) for s, w, p in mapper.flat_panes(app)
+                 if s["id"] == sid]
+        if not panes:
+            return None
+        _s, _w, chosen = next((x for x in panes if x[2]["active"]), panes[0])
+        return app.get_session_by_id(chosen["iterm_session_id"])
 
     # $session:window.pane -- drop the session part; we only have one level of
     # window grouping and the ids are globally unique anyway.
@@ -226,6 +249,26 @@ async def _new_session(backend, peer, detached: bool, name, printed: bool):
     peer.attach(session_id=pane.session_id)
 
 
+async def _new_window(backend, peer, near, name, start_dir, printed: bool,
+                      argv) -> None:
+    """new-window: a new iTerm2 tab in the window holding `near`."""
+    pane = await backend.api.new_window(near)
+    if pane is None:
+        _reply(peer, "itermux-bridge: could not create a tab\n", status=1)
+        return
+
+    if name:
+        await backend.api.set_name(pane, name)
+    # iTerm2 can't set a start directory or command at creation, so type them.
+    if start_dir:
+        await backend.api.send_text(pane, f"cd {shlex.quote(start_dir)}\n")
+    if argv:
+        await backend.api.send_text(pane, " ".join(argv) + "\n")
+
+    await backend.api.refresh()
+    _reply(peer, f"{_target_spec(backend, pane)}\n" if printed else "")
+
+
 async def _split(backend, peer, session, horizontal: bool, start_dir,
                  printed: bool, argv) -> None:
     """split-window: divide a pane, optionally cd'ing and running a command."""
@@ -245,8 +288,7 @@ async def _split(backend, peer, session, horizontal: bool, start_dir,
         await backend.api.send_text(pane, " ".join(argv) + "\n")
 
     await backend.api.refresh()
-    _reply(peer, f"%{backend.mapper.pane_id(pane.session_id)}\n"
-           if printed else "")
+    _reply(peer, f"{_target_spec(backend, pane)}\n" if printed else "")
 
 
 def _session_name(backend, pane) -> str:
@@ -469,6 +511,22 @@ def dispatch(backend, peer, argv) -> None:
             _new_session(backend, peer, detached="-d" in args,
                          name=_flag_value(args, "-s"), printed="-P" in args),
             "new-session")
+
+    elif cmd in ("new-window", "neww"):
+        # A tmux window is an iTerm2 TAB, created inside the window that holds
+        # the target pane — so `-t $0` lands in that session, as tmux means it.
+        target, rest = _target_pane(args)
+        near = (resolve_target(mapper, app, target)
+                if target is not NO_TARGET else mapper.focused_session(app))
+        if near is None:
+            _reply(peer, f"can't find session: {target}\n", status=1)
+            return
+        start_dir = _flag_value(args, "-c")
+        backend._spawn(
+            _new_window(backend, peer, near, name=_flag_value(args, "-n"),
+                        start_dir=start_dir, printed="-P" in args,
+                        argv=_strip_flags(rest, start_dir)),
+            "new-window")
 
     elif cmd in ("split-window", "splitw"):
         # tmux: -h splits left/right, -v (the default) top/bottom. iTerm2's
