@@ -1,5 +1,7 @@
 # itermux-bridge
 
+**English** · [简体中文](README.zh-CN.md)
+
 Speak the **real tmux protocol** to **iTerm2**. Attach a stock `tmux` client to a
 live iTerm2 session, or drive iTerm2 with `tmux send-keys` / `list-panes`.
 

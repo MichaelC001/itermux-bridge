@@ -1,110 +1,113 @@
-# 架构与设计评估
+# Architecture and Design Review
 
-## 一、当前状态评估(对照真 tmux)
+## 1. Current State (compared against real tmux)
 
-### 已经足够健壮的部分
+### Parts that are already solid
 
-| 方面 | 状态 | 依据 |
+| Aspect | State | Basis |
 |---|---|---|
-| imsg 协议编解码 | ✅ 可靠 | 对照 tmux 3.6b/3.7b 源码实现,含 `IMSG_FD_MARK` 等易错点;真实 tmux 二进制端到端验证 |
-| 握手 / fd 传递 | ✅ 可靠 | SCM_RIGHTS 双 fd、`MSG_EXIT` 4 字节状态、命令客户端不发 `MSG_READY` —— 均有回归测试 |
-| tty 接管 | ✅ 正确 | 复刻 `tty_start_tty()` 的 termios 标志,detach 时完整还原(含关鼠标上报) |
-| 渲染正确性 | ✅ 良好 | 宽字符按 cell 计宽、`style_at` 按 cell 索引、同步更新消除闪烁、光标不反复隐藏(IME 稳定) |
-| session/window/pane 映射 | ✅ 正确 | 索引 vs ID 分离、per-window 索引、ID 持久化 |
+| imsg protocol codec | ✅ Reliable | Implemented against tmux 3.6b/3.7b sources, including gotchas like `IMSG_FD_MARK`; verified end-to-end against a real tmux binary |
+| Handshake / fd passing | ✅ Reliable | SCM_RIGHTS dual fds, 4-byte `MSG_EXIT` status, command clients not sending `MSG_READY` — all covered by regression tests |
+| tty takeover | ✅ Correct | Replicates the termios flags of `tty_start_tty()`, fully restored on detach (including turning off mouse reporting) |
+| Rendering correctness | ✅ Good | Wide chars measured per cell, `style_at` indexed per cell, synchronized updates remove flicker, cursor is not hidden repeatedly (IME stays stable) |
+| session/window/pane mapping | ✅ Correct | Index vs ID kept separate, per-window indices, IDs persisted |
 
-### 与真 tmux 的**语义差距**(设计取舍,非 bug)
+### **Semantic gaps** versus real tmux (design trade-offs, not bugs)
 
-1. **不是多路复用器,是"视图桥"**
-   真 tmux 拥有 PTY,进程生命周期由它管理。本项目只是把 iTerm2 已有的会话**投影**出去 —— iTerm2 退出则一切消失。这是设计目标决定的,不是缺陷。
+1. **This is not a multiplexer, it is a "view bridge"**
+   Real tmux owns the PTY and manages process lifetimes. This project merely **projects** sessions that iTerm2 already has — when iTerm2 exits, everything goes away. That follows from the design goal; it is not a defect.
 
-2. **客户端 resize 不重排布局**
-   `on_resize` 只记录不动作。真 tmux 会把所有 pane 重新排版以适配最小客户端。这里刻意不改 iTerm2 的真实窗口(会干扰用户),代价是客户端比 iTerm2 窗口小时内容被裁切。
+2. **Client resize does not re-lay-out**
+   `on_resize` only records, it does not act. Real tmux re-tiles every pane to fit the smallest client. Here we deliberately avoid touching iTerm2's real window (it would disrupt the user); the cost is that content gets clipped when the client is smaller than the iTerm2 window.
 
-3. **多客户端共享同一 iTerm2 会话,但各自独立视图**
-   每个 peer 有独立的 `scroll_offset` / `copy` 状态(隔离正确),但没有真 tmux 的"多客户端共享同一 window 的 attach 语义"。
+3. **Multiple clients share one iTerm2 session but have independent views**
+   Each peer has its own `scroll_offset` / `copy` state (correctly isolated), but there is no equivalent of real tmux's "multiple clients attached to the same window" semantics.
 
-### 命令覆盖
+### Command coverage
 
-已实现:`attach` `ls` `list-windows` `list-panes` `send-keys` `display-message`
+Implemented: `attach` `ls` `list-windows` `list-panes` `send-keys` `display-message`
 `has-session` `detach-client` `select-window` / `next-window` / `previous-window`
 
-`kill-session` / `kill-window` 刻意拒绝执行 —— 桥不拥有那些 iTerm2 终端的生命
-周期,杀掉会毁掉用户真实的工作,故改为 detach 并说明。
+`kill-session` / `kill-window` deliberately refuse to run — the bridge does not own the
+lifetime of those iTerm2 terminals, and killing them would destroy the user's real work, so
+they detach and explain instead.
 
-仍缺:`rename-window` / `rename-session` / `resize-pane`、`split-window` 的
-`-h/-v` 参数解析(目前只有 prefix 绑定)。
+Still missing: `rename-window` / `rename-session` / `resize-pane`, and `-h/-v` argument
+parsing for `split-window` (currently only the prefix binding exists).
 
-## 二、当前的架构问题
-
-```
-iterm_backend.py  880 行 / 34 个方法  ← 单一类混杂 6 种职责
-```
-
-它同时承担:
-
-1. Gateway 回调分发(`on_attach` / `on_input` / `on_mouse` / …)
-2. 鼠标语义(选择、滚动、转发决策)
-3. copy-mode 键盘状态机
-4. prefix 命令执行(zoom / split / 导航)
-5. 屏幕轮询与变化检测
-6. iTerm2 API 适配(取内容、取历史、菜单项)
-
-**耦合代价**:改鼠标逻辑要读 880 行;copy-mode 的 bug 反复出现在渲染、轮询、输入三处交叉点;iTerm2 API 细节渗透到状态机里。
-
-**已经做对的**:除 `iterm_backend.py` 外,几乎所有模块**不依赖 iterm2 SDK**,协议层天然可复用。
-
-## 三、拆分方案(已实施)
-
-按 **"tmux 主体功能" × "复用程度"** 两个维度切:
+## 2. Current architectural problems
 
 ```
-┌─ 第 1 层:tmux 协议(与 iTerm2 完全无关,可独立成库)────────────┐
-│  protocol.py      消息类型常量                                  │
-│  imsg_codec.py    帧编解码                                      │
-│  gateway.py       Unix socket 监听 / accept                     │
-│  peer.py          单客户端状态机(握手→attach→detach)          │
-│  tty.py           客户端 tty 接管                               │
-└─────────────────────────────────────────────────────────────────┘
-                          ↓ 依赖
-┌─ 第 2 层:终端语义(纯逻辑,不碰任何后端)──────────────────────┐
-│  ansi.py          样式 → ANSI 编码 / 屏幕合成                   │
-│  layout.py        分屏树 → 屏幕矩形                             │
-│  mouse.py         SGR 鼠标序列解析                              │
-│  copymode.py      选择区几何 / 文本提取 / OSC 52                │
-│  keys.py    【新】prefix 绑定表 + repeat 窗口(从 peer.py 抽出)│
-└─────────────────────────────────────────────────────────────────┘
-                          ↓ 依赖
-┌─ 第 3 层:会话模型(定义"tmux 概念",后端无关)────────────────┐
-│  mapper.py        session/window/pane ↔ 后端对象 的 ID 映射     │
-│  commands.py      tmux 命令解析与分发                           │
-│  backend.py 【新】抽象接口:后端需要提供什么(取内容/发键/分屏)│
-└─────────────────────────────────────────────────────────────────┘
-                          ↓ 实现
-┌─ 第 4 层:iTerm2 适配(唯一依赖 iterm2 SDK 的地方)──────────────┐
-│  iterm/api.py     【拆】iTerm2 API 封装:取屏幕/历史/菜单/分屏  │
-│  iterm/session.py 【拆】会话与 tab 查找、邻接 pane 计算         │
-└─────────────────────────────────────────────────────────────────┘
-                          ↓ 组装
-┌─ 第 5 层:交互编排(把上面几层粘起来)──────────────────────────┐
-│  view.py     【新】屏幕轮询 + 变化检测 + 重绘调度(_pump/_paint)│
-│  input.py    【新】输入路由:键盘/鼠标/copy-mode 分派           │
-│  actions.py  【新】prefix 动作执行(zoom/split/导航/翻页)      │
-└─────────────────────────────────────────────────────────────────┘
+iterm_backend.py  880 lines / 34 methods  ← one class mixing 6 responsibilities
 ```
 
-### 拆分后 `iterm_backend.py` 的去向
+It simultaneously handles:
 
-| 原方法 | 去处 | 理由 |
+1. Gateway callback dispatch (`on_attach` / `on_input` / `on_mouse` / …)
+2. Mouse semantics (selection, scrolling, forwarding decisions)
+3. The copy-mode keyboard state machine
+4. prefix command execution (zoom / split / navigation)
+5. Screen polling and change detection
+6. iTerm2 API adaptation (fetching contents, fetching history, menu items)
+
+**Cost of the coupling**: touching mouse logic means reading 880 lines; copy-mode bugs keep resurfacing at the intersection of rendering, polling, and input; iTerm2 API details bleed into the state machine.
+
+**What is already right**: apart from `iterm_backend.py`, almost no module **depends on the iterm2 SDK**, so the protocol layer is naturally reusable.
+
+## 3. Split plan (implemented)
+
+Cut along two axes: **"core tmux functionality" × "degree of reusability"**:
+
+```
+┌─ Layer 1: tmux protocol (entirely iTerm2-agnostic, could be its own lib)──┐
+│  protocol.py      message type constants                                  │
+│  imsg_codec.py    frame codec                                             │
+│  gateway.py       Unix socket listen / accept                             │
+│  peer.py          per-client state machine (handshake→attach→detach)      │
+│  tty.py           client tty takeover                                     │
+└───────────────────────────────────────────────────────────────────────────┘
+                          ↓ depends on
+┌─ Layer 2: terminal semantics (pure logic, touches no backend)─────────────┐
+│  ansi.py          style → ANSI encoding / screen composition              │
+│  layout.py        split tree → screen rectangles                          │
+│  mouse.py         SGR mouse sequence parsing                              │
+│  copymode.py      selection geometry / text extraction / OSC 52           │
+│  keys.py    【new】prefix binding table + repeat window (out of peer.py)   │
+└───────────────────────────────────────────────────────────────────────────┘
+                          ↓ depends on
+┌─ Layer 3: session model (defines the "tmux concepts", backend-agnostic)───┐
+│  mapper.py        session/window/pane ↔ backend object ID mapping         │
+│  commands.py      tmux command parsing and dispatch                       │
+│  backend.py 【new】abstract interface: what a backend must provide         │
+│                   (fetch contents / send keys / split)                    │
+└───────────────────────────────────────────────────────────────────────────┘
+                          ↓ implemented by
+┌─ Layer 4: iTerm2 adapter (the only place depending on the iterm2 SDK)─────┐
+│  iterm/api.py     【split】iTerm2 API wrapper: screen/history/menu/split   │
+│  iterm/session.py 【split】session and tab lookup, neighbour pane math     │
+└───────────────────────────────────────────────────────────────────────────┘
+                          ↓ assembled by
+┌─ Layer 5: interaction orchestration (glues the layers above together)─────┐
+│  view.py     【new】screen polling + change detection + repaint scheduling │
+│                    (_pump/_paint)                                         │
+│  input.py    【new】input routing: keyboard/mouse/copy-mode dispatch       │
+│  actions.py  【new】prefix action execution (zoom/split/nav/paging)        │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Where `iterm_backend.py` went after the split
+
+| Original method | Destination | Rationale |
 |---|---|---|
-| `_pump_screen` `_signature` `_paint*` `_history` | **view.py** | 渲染调度是独立关注点,bug 高发区 |
-| `on_input` `on_mouse` `on_copy_key` `_handle_mouse` `_mouse_select` `_copy_key` `_esc_timeout` | **input.py** | 输入路由 + copy-mode 键盘状态机 |
-| `_prefix` `_zoom` `_neighbour` `_page` `_move_v` | **actions.py** | prefix 动作执行 |
-| `_screen_text` `_tab_of` `_bounds_at` `_pane_bounds` | **iterm/session.py** | iTerm2 对象导航 |
-| `_send` `_send_raw` + 菜单调用 | **iterm/api.py** | SDK 封装 |
+| `_pump_screen` `_signature` `_paint*` `_history` | **view.py** | Repaint scheduling is its own concern and a bug hotspot |
+| `on_input` `on_mouse` `on_copy_key` `_handle_mouse` `_mouse_select` `_copy_key` `_esc_timeout` | **input.py** | Input routing + the copy-mode keyboard state machine |
+| `_prefix` `_zoom` `_neighbour` `_page` `_move_v` | **actions.py** | prefix action execution |
+| `_screen_text` `_tab_of` `_bounds_at` `_pane_bounds` | **iterm/session.py** | iTerm2 object navigation |
+| `_send` `_send_raw` + menu invocations | **iterm/api.py** | SDK wrapper |
 
-### 关键收益:`backend.py` 抽象接口
+### The key win: the `backend.py` abstract interface
 
-定义后端契约后,tmux 协议层就与 iTerm2 解耦:
+Once the backend contract is defined, the tmux protocol layer is decoupled from iTerm2:
 
 ```python
 class Backend(Protocol):
@@ -116,52 +119,54 @@ class Backend(Protocol):
     def layout(self, window_id) -> SplitTree: ...
 ```
 
-这样能:
-- **单元测试不需要 iTerm2** —— 现在 `test_copymode` / `test_mouse` 里那些手搓的 `_Peer` / `ITermBackend.__new__` 假对象可以换成一个正经的 `FakeBackend`
-- 未来接别的后端(比如真 tmux passthrough、或 Terminal.app)只写一个适配层
+That gives us:
+- **Unit tests without iTerm2** — the hand-rolled `_Peer` / `ITermBackend.__new__` fakes currently in `test_copymode` / `test_mouse` can be replaced by a proper `FakeBackend`
+- Plugging in another backend later (real tmux passthrough, or Terminal.app) means writing only an adapter layer
 
-## 四、建议的边界情况加固(按优先级)
+## 4. Suggested edge-case hardening (by priority)
 
-1. **`imsg_codec` 抗恶意输入**:超长 `len`、永不补全的截断帧会让 `_buf` 无限增长。应设上限并断开。
-2. **`create_task` 的异常吞噬**:多处 `self.loop.create_task(...)` 没有异常处理,任务里抛异常会静默丢失,peer 状态可能半死不活。
-3. **pane 中途消失**:`get_session_by_id` 返回 None 时多数路径只是 `return`,客户端会看到画面冻结而非明确提示。
-4. **客户端小于 iTerm2 窗口**:目前裁切。至少应在状态栏提示尺寸不匹配。
-5. **补齐 `has-session` / `detach-client` / `select-window`**:脚本化使用的常见依赖。
+1. **`imsg_codec` against malicious input**: an oversized `len` or a truncated frame that never completes will grow `_buf` without bound. Enforce a cap and disconnect.
+2. **Exceptions swallowed by `create_task`**: several `self.loop.create_task(...)` calls have no exception handling; an exception inside the task is lost silently and the peer can end up half-dead.
+3. **Pane disappearing mid-flight**: when `get_session_by_id` returns None most paths simply `return`, so the client sees a frozen screen instead of a clear message.
+4. **Client smaller than the iTerm2 window**: currently clipped. At minimum the status bar should flag the size mismatch.
+5. **Filling in `has-session` / `detach-client` / `select-window`**: common dependencies for scripted use.
 
 
 ---
 
-## 五、实施结果
+## 5. Results
 
-拆分与加固已完成,九个测试套件全绿,两台机器 live 验证通过。
+The split and the hardening are done: nine test suites green, live-verified on two machines.
 
 ```
-拆分前                        拆分后
-iterm_backend.py  929 行  →   140 行(只做组装)
-ansi.py           598 行  →   464 行 + sgr.py 153 行
+before                        after
+iterm_backend.py  929 lines →   140 lines (assembly only)
+ansi.py           598 lines →   464 lines + sgr.py 153 lines
 ```
 
-最终分层:
+Final layering:
 
-| 模块 | 行数 | 职责 | 依赖 iterm2 SDK |
+| Module | Lines | Responsibility | Depends on iterm2 SDK |
 |---|---|---|---|
-| `protocol.py` `imsg_codec.py` `gateway.py` `peer.py` `tty.py` | ~800 | tmux 协议 | ❌ |
-| `keys.py` `sgr.py` `ansi.py` `layout.py` `mouse.py` `copymode.py` | ~1100 | 终端语义 | ❌ |
-| `mapper.py` `commands.py` `backend.py` | ~600 | 会话模型 | ❌ |
-| `iterm/api.py` | 195 | **唯一** 的 SDK 封装 | ✅ |
-| `view.py` `input.py` `actions.py` | ~780 | 交互编排 | ❌ |
-| `iterm_backend.py` | 140 | 组装 | ✅(仅构造 ITermAPI) |
+| `protocol.py` `imsg_codec.py` `gateway.py` `peer.py` `tty.py` | ~800 | tmux protocol | ❌ |
+| `keys.py` `sgr.py` `ansi.py` `layout.py` `mouse.py` `copymode.py` | ~1100 | terminal semantics | ❌ |
+| `mapper.py` `commands.py` `backend.py` | ~600 | session model | ❌ |
+| `iterm/api.py` | 195 | the **only** SDK wrapper | ✅ |
+| `view.py` `input.py` `actions.py` | ~780 | interaction orchestration | ❌ |
+| `iterm_backend.py` | 140 | assembly | ✅ (only constructs ITermAPI) |
 
-**关键成果:所有 iTerm2 SDK 调用收拢进 `iterm/api.py`。** 上层通过 `self.api`
-访问,SDK 的失败(pane 中途消失、连接抖动)在那一层统一降级为 `None`/no-op,
-不再让每个调用点各写一遍 try/except。
+**Key outcome: every iTerm2 SDK call is now funnelled through `iterm/api.py`.** Upper layers
+go through `self.api`, and SDK failures (pane vanishing mid-flight, connection jitter) are
+uniformly degraded to `None`/no-op at that layer, so each call site no longer writes its own
+try/except.
 
-拆分立即兑现的价值:`test_prefix.py` 现在直接测 `keys.PrefixState`,不再需要
-伪造 `Peer` —— 测的是真实代码路径。
+Value the split paid out immediately: `test_prefix.py` now tests `keys.PrefixState` directly
+and no longer needs a fake `Peer` — it exercises the real code path.
 
-## 六、仍未做的
+## 6. Still not done
 
-- `mapper.py` 仍直接读 `app.terminal_windows` / `get_session_by_id`。这些是
-  同步只读查找,不会失败,收益低于改动成本,故保留。
-- `resize-pane` / `rename-window` / `.tmux.conf` 解析仍未实现。
-- 客户端 resize 仍不重排布局(见 §一)。
+- `mapper.py` still reads `app.terminal_windows` / `get_session_by_id` directly. These are
+  synchronous read-only lookups that cannot fail, so the payoff is lower than the cost of
+  changing them; left as is.
+- `resize-pane` / `rename-window` / `.tmux.conf` parsing are still unimplemented.
+- Client resize still does not re-lay-out (see §1).
