@@ -9,6 +9,17 @@ tmux -S ~/.itermux/default.sock list-panes    # enumerate iTerm2 sessions as pan
 tmux -S ~/.itermux/default.sock send-keys -t %3 'ls' Enter
 ```
 
+One table to read the rest of this by — **iTerm2 tab = tmux window**, and note
+that "session" means opposite things on each side:
+
+| tmux | iTerm2 |
+|---|---|
+| session `$N` | window |
+| window `@N` | tab |
+| pane `%N` | session (a split within a tab) |
+
+→ [Install](#install) · [First run](#first-run) · [Prefix keys](#supported)
+
 ## Why this exists
 
 **Reaching a Mac over SSH puts you in a different, more restricted world than
@@ -101,11 +112,9 @@ tmux's client↔server wire protocol (imsg framing over a Unix socket, with
     tmux client  ──imsg/SCM_RIGHTS──▶  itermux-bridge  ──WebSocket──▶  iTerm2
                  ◀──── your tty fd ───┘  (renders + forwards keys)
 
-| tmux         | iTerm2  |
-|--------------|---------|
-| session `$N` | window  |
-| window `@N`  | tab     |
-| pane `%N`    | session (a split within a tab) |
+The concept mapping is the table at the top: iTerm2 window → tmux session `$N`,
+tab → window `@N`, split → pane `%N`. Only **pane** means the same thing on both
+sides. In practice:
 
 ```
 $ tmux -S ~/.itermux/default.sock ls
@@ -173,6 +182,37 @@ The bridge runs as an AutoLaunch script, so it lives exactly as long as iTerm2 d
 
 ```
 itermux-bridge install | uninstall | status | logs [-f] | doctor
+```
+
+### First run
+
+Check the bridge is up before attaching anything — `list-panes` needs no tty, so
+it either prints your real iTerm2 splits or tells you what's wrong:
+
+```console
+$ tmux -S ~/.itermux/default.sock list-panes -a
+0:0.0: [162x59] [zsh]    %0
+0:7.1: [162x29] [claude] %8 (active)
+```
+
+*No such file or directory* means the bridge isn't running — run `doctor`, and
+check the Python API setting above. Empty output with no error means it's
+running but iTerm2 has no windows open.
+
+Then attach to one of the panes it listed, and detach again:
+
+```bash
+tmux -S ~/.itermux/default.sock a -t %8    # attach to that pane
+# ... Ctrl-B d to detach. The pane keeps running in iTerm2.
+```
+
+Detaching closes only your view — nothing in iTerm2 is stopped, so this is safe
+to try on a pane doing real work. Worth adding a shell alias, since the socket
+path is on every command:
+
+```bash
+alias it='tmux -S ~/.itermux/default.sock'
+it list-panes -a && it a -t %8
 ```
 
 ## Supported
