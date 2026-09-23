@@ -30,8 +30,22 @@ async def serve(connection, config: Config) -> None:
     log.info("itermux-bridge ready — connect with: tmux -S %s attach",
              config.socket_path)
     try:
-        # Sleep forever; iTerm2 keeps the process alive.
-        await asyncio.Event().wait()
+        # Live exactly as long as the iTerm2 connection. When iTerm2 quits or
+        # restarts, the websocket closes but nothing kills this process: waiting
+        # on a bare Event() kept an orphan alive with a dead connection, still
+        # holding the socket — so every client attached to a bridge that could
+        # neither read screens nor send keys, and every new bridge iTerm2
+        # launched died on "socket already in use".
+        wait_closed = getattr(getattr(connection, "websocket", None),
+                              "wait_closed", None)
+        if wait_closed is None:
+            # Older iterm2/websockets runtime: can't watch for the disconnect,
+            # so keep the old live-forever behaviour rather than fail to start.
+            log.warning("cannot watch iTerm2 connection; running without "
+                        "exit-on-disconnect")
+            await asyncio.Event().wait()
+        await wait_closed()
+        log.warning("iTerm2 connection closed; exiting")
     finally:
         gw.stop()
 
@@ -44,7 +58,14 @@ def main() -> None:
     log.info("starting itermux-bridge")
 
     async def _main(connection):
-        await serve(connection, config)
+        try:
+            await serve(connection, config)
+        except Exception:
+            # iterm2 prints this to the Script Console only; without logging
+            # here a failed start shows up in bridge.log as "starting" and
+            # then silence.
+            log.exception("itermux-bridge failed")
+            raise
 
     iterm2.run_forever(_main)
 

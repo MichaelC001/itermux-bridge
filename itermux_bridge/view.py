@@ -38,6 +38,8 @@ class ScreenView:
                 contents = await self.api.screen(session)
             except Exception:
                 return None
+            if contents is None:
+                return None
             return ansi.visible_lines(contents, cols, rows, peer.scroll_offset)
 
         tab = self._tab_of(session)
@@ -54,6 +56,8 @@ class ScreenView:
             try:
                 c = await self.api.screen(s)
             except Exception:
+                continue
+            if c is None:
                 continue
             for i, text in enumerate(
                     ansi.visible_lines(c, r.width, r.height)):
@@ -163,6 +167,12 @@ class ScreenView:
             try:
                 c = await self.api.screen(s)
             except Exception:
+                continue
+            # api.screen() returns None when a fetch fails (e.g. the pane is
+            # still coming up right after attach). Leave it out of this poll's
+            # signature — the next poll retries — rather than letting the
+            # AttributeError end the pump and detach the client.
+            if c is None:
                 continue
             if s.session_id == session.session_id:
                 own = c
@@ -278,6 +288,9 @@ class ScreenView:
 
         if contents is None:
             contents = await self.api.screen(session)
+        if contents is None:
+            # Fetch failed; skip this frame; the pump repaints on the next poll.
+            return
         peer.write_out(ansi.render(contents, cols, rows,
                                    scroll_offset=peer.scroll_offset,
                                    copy=peer.copy))
