@@ -125,7 +125,7 @@ class ScreenView:
 
                 # A changed target (or a changed tab shape, e.g. zoom collapsing
                 # the split tree) must force a repaint even if no pane emitted.
-                sig, contents = await self._signature(peer, current)
+                sig, contents, fetched = await self._signature(peer, current)
                 if sid != last_sid or sig != last_sig:
                     # Don't record the new signature if the client is backlogged:
                     # _paint would drop this frame, and we'd never repaint it
@@ -134,12 +134,12 @@ class ScreenView:
                         continue
                     last_sid, last_sig = sid, sig
                     # Reuse what _signature already fetched — refetching inside
-                    # _paint would double every poll's WebSocket traffic. Only
-                    # the single-pane path can take it; window mode fetches all
-                    # panes itself.
-                    await self._paint(
-                        peer, current,
-                        contents=None if peer.window_mode else contents)
+                    # _paint doubles every poll's WebSocket traffic. Window mode
+                    # used to refetch all of them: with 8 panes that was 35ms of
+                    # round-trips twice per 50ms poll, so the event loop never
+                    # went idle and keystrokes queued behind it.
+                    await self._paint(peer, current, contents=contents,
+                                      fetched=fetched)
 
         except asyncio.CancelledError:
             raise
@@ -163,6 +163,7 @@ class ScreenView:
 
         parts = []
         own = None
+        fetched = {}
         for s in sessions:
             try:
                 c = await self.api.screen(s)
@@ -174,6 +175,7 @@ class ScreenView:
             # AttributeError end the pump and detach the client.
             if c is None:
                 continue
+            fetched[s.session_id] = c
             if s.session_id == session.session_id:
                 own = c
             # Hash the visible text plus the cursor: changes on any edit, scroll
@@ -190,9 +192,9 @@ class ScreenView:
         # copy-mode" symptom: q/Esc worked, but the status bar never got erased).
         cm = peer.copy
         copy_state = (cm.active, cm.cy, cm.cx, cm.anchor, peer.scroll_offset)
-        return (tuple(parts), copy_state), own
+        return (tuple(parts), copy_state), own, fetched
 
-    async def _paint_window(self, peer, session) -> bool:
+    async def _paint_window(self, peer, session, fetched=None) -> bool:
         """Draw the whole tab — every pane, with dividers.
 
         Returns False only if there is no tab to draw; a *single*-pane tab is
@@ -232,7 +234,12 @@ class ScreenView:
                     if contents is None:
                         contents = await self.api.screen(s)
                 else:
-                    contents = await self.api.screen(s)
+                    # The pump already fetched every pane to build the
+                    # signature; fetching them again here doubled the
+                    # round-trips per poll.
+                    contents = (fetched or {}).get(s.session_id)
+                    if contents is None:
+                        contents = await self.api.screen(s)
                 panes.append((r, contents))
             except Exception as e:
                 log.debug("pane %s contents failed: %s", r.session_id[:8], e)
@@ -245,7 +252,7 @@ class ScreenView:
             titles=titles))
         return True
 
-    async def _paint(self, peer, session, contents=None) -> None:
+    async def _paint(self, peer, session, contents=None, fetched=None) -> None:
         if peer.closed or peer.tty is None:
             return
 
@@ -257,6 +264,9 @@ class ScreenView:
         # overwrote it with the live screen.
         if peer.scroll_offset > 0:
             contents = None
+            # Same for the per-pane cache: it is live-screen content too, and
+            # the active pane must come from history() instead.
+            fetched = None
         # Drop this frame if the client still hasn't drained the last one. Each
         # paint is a full screen, so the next one supersedes it — queueing both
         # would just grow the buffer behind a slow reader without ever showing
@@ -271,7 +281,7 @@ class ScreenView:
         # through history while the rest stay live), so don't drop out of the
         # split view just because the client is scrolled back.
         if peer.window_mode:
-            if await self._paint_window(peer, session):
+            if await self._paint_window(peer, session, fetched):
                 return
 
         cols, rows = peer.tty.size()
