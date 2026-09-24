@@ -123,6 +123,11 @@ class ScreenView:
                     peer.scroll_offset = 0
                     current = replacement
 
+                # Zoomed pane -> we take the mouse so the wheel scrolls its
+                # history; unzoomed -> give it back. No RPC: the zoom state is
+                # on the tab object iTerm2 keeps current for us.
+                self._sync_zoom_mouse(peer, current)
+
                 # A changed target (or a changed tab shape, e.g. zoom collapsing
                 # the split tree) must force a repaint even if no pane emitted.
                 sig, contents, fetched = await self._signature(peer, current)

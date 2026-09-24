@@ -70,6 +70,19 @@ class Peer:
         #: leaves the terminal's own selection (double-click, drag, right-click
         #: copy) working. Ctrl-B m turns it on.
         self.mouse_on = False
+        #: Whether the pane we're showing is zoomed (Ctrl-B z), as last seen by
+        #: the screen pump, and whether that zoom has us owning the mouse. A
+        #: zoomed pane reads as a whole terminal, and the one thing people then
+        #: reach for is the wheel — which with mouse off only scrolls the
+        #: client's own scrollback of repaint frames. Ctrl-B m during a zoom
+        #: turns it back off until the next zoom.
+        self.zoomed = False
+        self.zoom_mouse = False
+
+    @property
+    def mouse_owned(self) -> bool:
+        """Do we currently hold mouse reporting (explicitly, or for a zoom)?"""
+        return self.mouse_on or self.zoom_mouse
 
     @property
     def backlogged(self) -> bool:

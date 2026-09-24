@@ -56,7 +56,13 @@ class PrefixActions:
                 # mouse with the client's terminal, so selection is native. ON
                 # hands it to us: the wheel pages through scrollback and a TUI
                 # gets its clicks — at the cost of the terminal's own selection.
-                peer.mouse_on = not peer.mouse_on
+                # Toggle what the user actually has: during a zoom the mouse is
+                # already ours, and flipping only `mouse_on` would switch it
+                # "on" with no visible change. Turning it off also drops the
+                # zoom's claim for the rest of that zoom.
+                owned = not peer.mouse_owned
+                peer.mouse_on = owned
+                peer.zoom_mouse = False
                 # Leave copy-mode whenever mouse ownership changes. Mouse-driven
                 # selection put us there; once the mouse is no longer ours (or
                 # its ownership just flipped) there's no way to drive or exit the

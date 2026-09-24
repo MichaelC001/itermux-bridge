@@ -57,7 +57,7 @@ class InputRouter:
         # other program left ?1000h on). Treating those as a selection dragged us
         # into copy-mode on a stray click and wouldn't let go. Hand them to the
         # app instead, exactly as a bare tmux with `mouse off` does.
-        if not peer.mouse_on:
+        if not peer.mouse_owned:
             for ev in events:
                 await self._send_raw(session, ev.encode())
             return
@@ -82,6 +82,32 @@ class InputRouter:
             # dropped these events (as we used to) there would be no way to
             # select text at all.
             await self._mouse_select(peer, session, ev)
+
+    def _sync_zoom_mouse(self, peer, pane) -> None:
+        """Take the mouse while `pane` is zoomed, give it back when it isn't.
+
+        Called by the screen pump every poll, so a zoom toggled from iTerm2
+        itself is picked up too, not just Ctrl-B z. Acts only on a zoom
+        *transition*: that is what lets Ctrl-B m switch it off mid-zoom without
+        the next poll switching it straight back on.
+        """
+        zoomed = self.api.is_zoomed(self.api.tab_of(pane.session_id))
+        if zoomed == peer.zoomed:
+            return
+        was_owned = peer.mouse_owned
+        peer.zoomed = zoomed
+        peer.zoom_mouse = zoomed
+        if peer.mouse_owned == was_owned:
+            return          # Ctrl-B m already had it on; nothing changes hands
+
+        # Same reset as Ctrl-B m, for the same reason: a selection or scrolled
+        # view the mouse was driving can't be driven once the mouse is gone.
+        peer.copy.leave()
+        peer.scroll_offset = 0
+        peer.write_out(ansi.ENABLE_MOUSE if peer.mouse_owned
+                       else ansi.DISABLE_MOUSE)
+        log.info("zoom %s: mouse reporting %s", "in" if zoomed else "out",
+                 "on" if peer.mouse_owned else "off")
 
     async def _mouse_select(self, peer, session, ev) -> None:
         """Press-drag-release selects text; releasing copies it, as tmux does."""

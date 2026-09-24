@@ -86,7 +86,12 @@ class _Peer:
         self.iterm_session_id = "s"
         self.window_mode = False
         self.mouse_on = mouse_on
+        self.zoom_mouse = False
         self.to_app = bytearray()
+
+    @property
+    def mouse_owned(self):
+        return self.mouse_on or self.zoom_mouse
 
 
 def _handle(mouse_on, events):
@@ -158,6 +163,105 @@ def _toggle_mouse_off():
 p = _toggle_mouse_off()
 check("turning mouse off leaves copy-mode", not p.copy.active)
 check("...and clears scrollback offset", p.scroll_offset == 0)
+
+
+print("\n=== zoomed pane: the bridge takes the mouse so the wheel scrolls ===")
+
+from itermux_bridge.peer import Peer  # noqa: E402  (real mouse_owned logic)
+from itermux_bridge.sgr import DISABLE_MOUSE, ENABLE_MOUSE  # noqa: E402
+
+
+class _Pane:
+    session_id = "s"
+
+
+class _ZoomAPI:
+    """Just enough ITermAPI for _sync_zoom_mouse / the toggle-mouse action."""
+    def __init__(self):
+        self.zoomed = False
+    def tab_of(self, sid):
+        return "tab"
+    def is_zoomed(self, tab):
+        return self.zoomed
+    def pane(self, sid):
+        return _Pane()
+
+
+def _zoom_rig():
+    be = ITermBackend.__new__(ITermBackend)
+    be.api = _ZoomAPI()
+    peer = Peer.__new__(Peer)
+    peer.mouse_on, peer.zoomed, peer.zoom_mouse = False, False, False
+    peer.copy, peer.scroll_offset, peer.tty = CopyMode(), 0, _TTY()
+    peer.iterm_session_id = "s"
+    peer.written = bytearray()
+    peer.write_out = peer.written.extend
+    async def _paint(peer, session, contents=None, fetched=None): pass
+    be._paint = _paint
+    return be, peer
+
+
+be, peer = _zoom_rig()
+be._sync_zoom_mouse(peer, _Pane())
+check("unzoomed: mouse stays with the client terminal",
+      not peer.mouse_owned and bytes(peer.written) == b"")
+
+be.api.zoomed = True
+peer.scroll_offset = 7
+be._sync_zoom_mouse(peer, _Pane())
+check("zoom in: we take the mouse", peer.mouse_owned)
+check("...and ask the client for reports", bytes(peer.written) == ENABLE_MOUSE)
+
+peer.written.clear()
+be._sync_zoom_mouse(peer, _Pane())
+check("still zoomed: nothing re-sent every poll", bytes(peer.written) == b"")
+
+# The whole point: with mouse owned and the app not wanting the mouse, the
+# wheel pages through scrollback instead of reaching the client's own buffer.
+class _WheelAPI(_ZoomAPI):
+    async def variable(self, pane, name, default=None):
+        return -1                           # a shell: no mouse reporting
+    async def send_text(self, pane, text):
+        self.forwarded = text               # wheel leaked to the app instead
+be.api = _WheelAPI(); be.api.zoomed = True
+wheel_up = mouse.parse(b"\x1b[<64;10;10M")[0][0]
+loop = asyncio.new_event_loop()
+peer.scroll_offset = 0
+loop.run_until_complete(be._handle_mouse(peer, _Pane(), [wheel_up]))
+check("zoomed + wheel up scrolls into history", peer.scroll_offset > 0,
+      f"(offset={peer.scroll_offset})")
+
+peer.written.clear()
+peer.copy.enter(40)
+be.api.zoomed = False
+be._sync_zoom_mouse(peer, _Pane())
+check("zoom out: mouse handed back", not peer.mouse_owned
+      and bytes(peer.written) == DISABLE_MOUSE)
+check("...back on the live screen, out of copy-mode",
+      peer.scroll_offset == 0 and not peer.copy.active)
+
+# Ctrl-B m during a zoom turns it OFF — and the next poll must not grab it
+# straight back, or the toggle would be impossible to use.
+be, peer = _zoom_rig()
+be.api.zoomed = True
+be._sync_zoom_mouse(peer, _Pane())
+loop.run_until_complete(be._prefix(peer, "s", "toggle-mouse"))
+check("Ctrl-B m while zoomed turns the mouse off", not peer.mouse_owned)
+peer.written.clear()
+be._sync_zoom_mouse(peer, _Pane())
+check("...and the pump leaves it off for this zoom",
+      not peer.mouse_owned and bytes(peer.written) == b"")
+be.api.zoomed = False; be._sync_zoom_mouse(peer, _Pane())
+be.api.zoomed = True;  be._sync_zoom_mouse(peer, _Pane())
+check("...until the next zoom, which takes it again", peer.mouse_owned)
+
+# Explicit Ctrl-B m ON outlives a zoom: unzooming must not switch it off.
+be, peer = _zoom_rig()
+loop.run_until_complete(be._prefix(peer, "s", "toggle-mouse"))
+be.api.zoomed = True;  be._sync_zoom_mouse(peer, _Pane())
+be.api.zoomed = False; be._sync_zoom_mouse(peer, _Pane())
+check("mouse turned on with Ctrl-B m survives zoom in/out", peer.mouse_owned)
+loop.close()
 
 
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")

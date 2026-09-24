@@ -59,6 +59,18 @@ class ITermAPI:
                     return t
         return None
 
+    def is_zoomed(self, tab) -> bool:
+        """True while a pane in `tab` is maximized (Ctrl-B z / Maximize Active Pane).
+
+        Zooming collapses `tab.sessions` to the one visible pane, which looks
+        exactly like a tab that only ever had one; the panes it hid move to
+        `minimized_sessions`, so that is the per-tab signal. (The menu item's
+        checked state only describes whichever tab is focused on the Mac.)
+        """
+        if tab is None:
+            return False
+        return bool(getattr(tab, "minimized_sessions", None))
+
     def grid_size(self, pane) -> Tuple[int, int]:
         g = pane.grid_size
         return int(g.width), int(g.height)
