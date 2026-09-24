@@ -9,6 +9,7 @@ import iterm2
 from . import ansi, copymode, layout, mouse
 from .mapper import SessionMapper
 from .actions import PrefixActions
+from .fit import SizeFitter
 from .iterm.api import ITermAPI
 from .input import InputRouter
 from .view import REFRESH_INTERVAL, ScreenView
@@ -16,7 +17,7 @@ from .view import REFRESH_INTERVAL, ScreenView
 log = logging.getLogger(__name__)
 
 
-class ITermBackend(PrefixActions, InputRouter, ScreenView):
+class ITermBackend(PrefixActions, InputRouter, ScreenView, SizeFitter):
     """Backend the Gateway talks to. One iTerm2 session per attached client."""
 
     def __init__(self, connection, app, mapper: SessionMapper) -> None:
@@ -108,9 +109,10 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
         return task
 
     def on_resize(self, peer, cols: int, rows: int) -> None:
-        # We deliberately do NOT resize the iTerm2 session to match the client:
-        # that would visibly reflow the user's real window. We letterbox
-        # instead — render what fits.
+        # Nothing to do here: the client's size is part of the screen pump's
+        # fit key, so its next poll refits the panes (fit.py). Cropping to the
+        # client instead — what this used to do — cut every row off at the
+        # client's right edge whenever it was narrower than the Mac.
         log.debug("client resized to %dx%d", cols, rows)
 
     def on_command(self, peer, argv) -> None:
@@ -121,6 +123,10 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView):
         task = self._pumps.pop(peer, None)
         if task:
             task.cancel()
+        # Every way a client leaves ends up here (Ctrl-B d, a dropped SSH
+        # connection, a killed client), so this is where the Mac window gets
+        # its size back.
+        self._release_fit(peer)
 
     # --- internals ---------------------------------------------------------
 

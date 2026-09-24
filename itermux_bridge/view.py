@@ -127,6 +127,10 @@ class ScreenView:
                 # history; unzoomed -> give it back. No RPC: the zoom state is
                 # on the tab object iTerm2 keeps current for us.
                 self._sync_zoom_mouse(peer, current)
+                # Keep the panes sized to this client, like tmux sizes a
+                # window, so a narrow client isn't shown rows cut off at its
+                # right edge. Refits only when the view or client size changes.
+                self._maybe_fit(peer, current)
 
                 # A changed target (or a changed tab shape, e.g. zoom collapsing
                 # the split tree) must force a repaint even if no pane emitted.

@@ -78,6 +78,11 @@ class Peer:
         #: turns it back off until the next zoom.
         self.zoomed = False
         self.zoom_mouse = False
+        #: Pane sizing (fit.py): what the panes were last fitted for, the fit
+        #: in flight, and the iTerm2 window we resized for this client.
+        self.fit_key = None
+        self.fit_task = None
+        self.fit_window: Optional[str] = None
 
     @property
     def mouse_owned(self) -> bool:

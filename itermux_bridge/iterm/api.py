@@ -246,6 +246,62 @@ class ITermAPI:
         except Exception as e:
             log.debug("resize failed: %s", e)
 
+    # --- sizing -------------------------------------------------------------
+
+    def window_of(self, tab):
+        """The iTerm2 window holding `tab`, or None."""
+        if tab is None:
+            return None
+        for w in self.windows():
+            if any(t.tab_id == tab.tab_id for t in w.tabs):
+                return w
+        return None
+
+    async def frame(self, window):
+        """The window's frame (to restore later), or None."""
+        try:
+            return await window.async_get_frame()
+        except Exception as e:
+            log.debug("get frame failed: %s", e)
+            return None
+
+    async def set_frame(self, window_id: str, frame) -> None:
+        """Put a window back to `frame`, if it still exists."""
+        window = next((w for w in self.windows()
+                       if w.window_id == window_id), None)
+        if window is None:
+            return
+        try:
+            await window.async_set_frame(frame)
+        except Exception as e:
+            log.warning("restore window frame failed: %s", e)
+
+    async def set_grid_sizes(self, sizes) -> bool:
+        """Resize panes to {session_id: (cols, rows)}. True if they all got it.
+
+        set_grid_size resizes the window around the pane, so a pane in a split
+        gets exactly its size while its neighbours keep their width. With
+        several panes, setting one moves the window under the others; a second
+        pass settles it (measured: one pass already converges for 2 panes).
+        Fails on a fullscreen window, whose size iTerm2 won't change.
+        """
+        for _ in range(2):
+            for sid, (w, h) in sizes.items():
+                pane = self.pane(sid)
+                if pane is None:
+                    continue
+                try:
+                    await pane.async_set_grid_size(iterm2.util.Size(w, h))
+                except Exception as e:
+                    log.debug("set_grid_size %s failed: %s", sid[:8], e)
+                    return False
+            await self.refresh()
+            if all(self.pane(sid) is None
+                   or self.grid_size(self.pane(sid)) == size
+                   for sid, size in sizes.items()):
+                return True
+        return False
+
     async def zoom(self, pane) -> None:
         """Toggle 'Maximize Active Pane' for the pane's tab.
 
