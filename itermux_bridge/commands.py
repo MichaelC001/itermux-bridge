@@ -384,9 +384,26 @@ def dispatch(backend, peer, argv) -> None:
                 for s, w, p in mapper.flat_panes(app)
             )
         else:
+            # -t names a window (or a pane in it); without it, the current one.
+            # -t used to be ignored here, so `list-panes -t @7` quietly listed
+            # whatever tab was focused on the Mac — and a script feeding that
+            # into send-keys typed into the wrong session.
+            target, _rest = _target_pane(args)
+            want = None
+            if target is not NO_TARGET:
+                pane = resolve_target(mapper, app, str(target))
+                want = next((w["id"] for _s, w, p in mapper.flat_panes(app)
+                             if pane is not None
+                             and p["iterm_session_id"] == pane.session_id),
+                            None)
+                if want is None:
+                    _reply(peer, f"can't find window: {target}\n", status=1)
+                    return
             out = ""
             for s, w, p in mapper.flat_panes(app):
-                if not w["active"]:
+                if want is None and not w["active"]:
+                    continue
+                if want is not None and w["id"] != want:
                     continue
                 out += (f"{p['index']}: [{p['width']}x{p['height']}] "
                         f"[{p['name']}] %{p['id']}"

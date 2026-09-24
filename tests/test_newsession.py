@@ -266,6 +266,51 @@ async def main():
     check("unknown $N still resolves to nothing",
           commands.resolve_target(m, app, "$99") is None)
 
+    # --- list-panes -t ----------------------------------------------------
+    # The focused window is @1; -t @2 must list @2, not whatever is focused.
+    # It used to ignore -t, and `list-panes -t @2 | ... | send-keys` typed into
+    # a session in the FOCUSED window instead.
+    def pane(pid, idx, sid, active):
+        return {"id": pid, "index": idx, "iterm_session_id": sid,
+                "name": sid, "width": 80, "height": 24, "active": active}
+
+    class TwoWindows(FakeMapper):
+        def find_session(self, app, pane_id):
+            # Like the real one: look the %id up in the inventory.
+            return next((FakePane(p["iterm_session_id"])
+                         for _s, _w, p in self.flat_panes(app)
+                         if p["id"] == pane_id), None)
+
+        def inventory(self, app):
+            return [{"id": 0, "active": True, "windows": [
+                {"id": 1, "index": 0, "active": True,
+                 "panes": [pane(10, 0, "focused-a", True)]},
+                {"id": 2, "index": 1, "active": False,
+                 "panes": [pane(20, 0, "other-a", False),
+                           pane(21, 1, "other-b", True)]},
+            ]}]
+
+    async def lsp(argv):
+        backend, peer = FakeBackend(FakeAPI()), FakePeer()
+        backend.mapper = TwoWindows()
+        commands.dispatch(backend, peer, argv)
+        return peer
+
+    peer = await lsp(["list-panes", "-t", "@2"])
+    check("list-panes -t @2 lists window @2",
+          "%20" in peer.text and "%21" in peer.text, f"({peer.text.strip()!r})")
+    check("...not the focused window", "%10" not in peer.text)
+    peer = await lsp(["list-panes", "-t", "%20"])
+    check("list-panes -t %N lists that pane's window",
+          "%21" in peer.text and "%10" not in peer.text)
+    peer = await lsp(["list-panes"])
+    check("no -t still lists the focused window",
+          "%10" in peer.text and "%20" not in peer.text)
+    peer = await lsp(["list-panes", "-t", "@99"])
+    check("unknown -t is an error, not a silent fallback",
+          peer.status == 1 and "%10" not in peer.text,
+          f"(status={peer.status}, {peer.text.strip()!r})")
+
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
     return 0 if ok else 1
 
