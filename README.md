@@ -330,6 +330,18 @@ right-click menu).
 through iTerm2's scrollback, and a TUI (vim, the Claude CLI) receives its clicks.
 The trade is the terminal's own selection, same as `set -g mouse on` in tmux.
 
+**The one exception: a zoomed pane (`Ctrl-B z`).** A zoomed pane reads as a whole
+terminal, and the first thing people reach for there is the wheel, which with
+mouse off only scrolls the client's own buffer of repaint frames. So while a pane
+is zoomed the bridge takes the mouse, the wheel pages through that pane's
+history, and unzooming hands it back. To **select text while zoomed, hold a
+modifier as you drag**, and your terminal does a native selection without
+reporting it: **Option (⌥) in iTerm2** ([documented](https://iterm2.com/documentation-one-page.html):
+"pressing option will temporarily disable [mouse reporting] so you can make a
+selection"); most other terminals (xterm, kitty, Alacritty, WezTerm, Ghostty,
+GNOME Terminal, Windows Terminal) use Shift. Or press `Ctrl-B m` to give the
+mouse back for the rest of that zoom.
+
 Careful, if you turn it on: iTerm2 reports `mouseReportingMode = **-1**` when
 reporting is off, not `0` — a truthiness check treats that as "enabled" and
 silently breaks scrollback.

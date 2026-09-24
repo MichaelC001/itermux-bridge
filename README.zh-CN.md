@@ -312,6 +312,15 @@ tmux 之外享有的全部原生行为，原样保留。
 而 TUI（vim、Claude CLI）能收到它的点击。代价是终端自身的选择功能，和 tmux 里的
 `set -g mouse on` 一样。
 
+**唯一的例外：缩放中的 pane（`Ctrl-B z`）。** 缩放后的 pane 看起来就是一整个终端，
+人第一反应就是去滚滚轮 —— 而鼠标关闭时，滚轮只会滚动客户端自己那份由重绘帧组成的
+缓冲。所以 pane 缩放期间 bridge 会接管鼠标，滚轮翻阅这个 pane 的历史，取消缩放就
+交还。**缩放期间要选中文本，拖动时按住修饰键**，终端就会做原生选中而不上报：
+**iTerm2 是 Option（⌥）**（[官方文档](https://iterm2.com/documentation-one-page.html)：
+按住 option 会临时关闭鼠标上报，以便选中）；其他大多数终端（xterm、kitty、
+Alacritty、WezTerm、Ghostty、GNOME Terminal、Windows Terminal）是 Shift。也可以按
+`Ctrl-B m`，在这次缩放剩下的时间里把鼠标交还给终端。
+
 如果你要打开它，请小心：当上报关闭时 iTerm2 报的是
 `mouseReportingMode = **-1**` 而不是 `0` —— 用真值判断会把它当成“已启用”，从而
 悄悄搞坏 scrollback。
