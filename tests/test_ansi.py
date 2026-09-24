@@ -338,6 +338,9 @@ class _EmitPeer:
         self.last_frame = self.frame_size = None
         self.frame_copy = False
         self.cols, self.written = 30, []
+        self.ttyname = "/dev/ttys000"
+        from itermux_bridge.latency import KeyTrace
+        self.trace = KeyTrace(self)
         me = self
 
         class T:

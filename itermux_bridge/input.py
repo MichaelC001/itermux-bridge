@@ -39,8 +39,14 @@ class InputRouter:
 
         # Log only the length: keystrokes carry passwords (§11.5).
         log.debug("input: %d bytes", len(keys))
-        self._spawn(self._send(session, keys.decode("utf-8", "replace")),
+        peer.trace.key_in()
+        self._spawn(self._send_keys(peer, session,
+                                    keys.decode("utf-8", "replace")),
                     "send-keys")
+
+    async def _send_keys(self, peer, session, text: str) -> None:
+        await self._send(session, text)
+        peer.trace.sent()
 
     async def _handle_mouse(self, peer, session, events) -> None:
         """Wheel scrolls our scrollback view; everything else goes to the app.

@@ -9,7 +9,7 @@ from typing import Optional
 
 from . import imsg_codec as codec
 from . import keys as keymap
-from . import mouse
+from . import latency, mouse
 from .copymode import CopyMode
 from .protocol import CLIENT_CONTROL, Msg
 from .tty import ClientTTY
@@ -88,6 +88,8 @@ class Peer:
         self.last_frame = None
         self.frame_size = None
         self.frame_copy = False
+        #: Keystroke-to-screen timing, on while ~/.itermux/trace exists.
+        self.trace = latency.KeyTrace(self)
 
     @property
     def mouse_owned(self) -> bool:
@@ -162,6 +164,8 @@ class Peer:
         elif not self._outbuf and self._write_armed:
             self.loop.remove_writer(self.stdout_fd)
             self._write_armed = False
+        if not self._outbuf:
+            self.trace.drained()
 
     # --- inbound ----------------------------------------------------------
 

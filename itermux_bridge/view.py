@@ -12,6 +12,7 @@ and they are far easier to reason about in isolation.
 
 import asyncio
 import logging
+import time
 
 from . import ansi, layout
 
@@ -134,8 +135,13 @@ class ScreenView:
 
                 # A changed target (or a changed tab shape, e.g. zoom collapsing
                 # the split tree) must force a repaint even if no pane emitted.
+                poll_start = time.monotonic()
                 sig, contents, fetched = await self._signature(peer, current)
-                if sid != last_sid or sig != last_sig:
+                changed = sid != last_sid or sig != last_sig
+                # A change we can't paint yet (client backlogged) isn't "seen":
+                # that wait belongs to the poll count, not to render time.
+                peer.trace.polled(poll_start, changed and not peer.backlogged)
+                if changed:
                     # Don't record the new signature if the client is backlogged:
                     # _paint would drop this frame, and we'd never repaint it
                     # because the signature would already look "current".
@@ -334,6 +340,9 @@ class ScreenView:
         # last row — entering or leaving copy-mode has to redraw that row.
         if size != peer.frame_size or peer.copy.active != peer.frame_copy:
             prev = None
+        # Before the write: write_out flushes synchronously, and the trace's
+        # "drained" fires from inside it.
+        peer.trace.painted()
         peer.write_out(ansi.diff(prev, frame))
         peer.last_frame = frame
         peer.frame_size, peer.frame_copy = size, peer.copy.active
