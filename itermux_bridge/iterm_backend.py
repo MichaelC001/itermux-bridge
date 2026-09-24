@@ -70,6 +70,9 @@ class ITermBackend(PrefixActions, InputRouter, ScreenView, SizeFitter):
             return
 
         peer.iterm_session_id = session.session_id
+        # A tab that isn't selected in its window doesn't get its screen state
+        # refreshed for the API, so everything shown would lag by seconds.
+        await self.api.reveal(session)
         pane = self.mapper.pane_id(session.session_id)
         log.info("peer(tty=%s) -> iTerm2 session %s (pane %s)",
                  peer.ttyname, session.session_id, pane)

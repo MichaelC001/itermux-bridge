@@ -40,6 +40,13 @@ class InputRouter:
         # Log only the length: keystrokes carry passwords (§11.5).
         log.debug("input: %d bytes", len(keys))
         peer.trace.key_in()
+        # Typing into a pane whose tab isn't selected on the Mac (someone
+        # switched tabs, or it never was) makes every echo lag by seconds:
+        # iTerm2 doesn't refresh a hidden tab's screen for the API. Bring the
+        # tab forward within its window — only when the client types, so
+        # someone at the Mac browsing tabs isn't fought over on every poll.
+        if not self.api.is_shown(session):
+            self._spawn(self.api.reveal(session), "reveal")
         self._spawn(self._send_keys(peer, session,
                                     keys.decode("utf-8", "replace")),
                     "send-keys")

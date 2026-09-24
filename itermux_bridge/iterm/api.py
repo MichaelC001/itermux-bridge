@@ -152,6 +152,33 @@ class ITermAPI:
         except Exception as e:
             log.warning("activate failed: %s", e)
 
+    def is_shown(self, pane) -> bool:
+        """Is `pane`'s tab the selected tab of its window?
+
+        No RPC: read from the objects iTerm2 keeps current for us.
+        """
+        tab = self.tab_of(pane.session_id) if pane is not None else None
+        window = self.window_of(tab)
+        return (window is not None and window.current_tab is not None
+                and window.current_tab.tab_id == tab.tab_id)
+
+    async def reveal(self, pane) -> None:
+        """Make `pane`'s tab the selected one in its window — nothing more.
+
+        iTerm2 stops refreshing the screen state the API reads for a tab that
+        isn't selected: typed keys reach the program, but its echo doesn't show
+        up in async_get_screen_contents for seconds (measured: not at all
+        within 8s in one case). A remote client typing into a background tab
+        sees exactly that as "typing lags ~1s". Unlike activate(), this doesn't
+        bring the window to the front of the Mac's screen.
+        """
+        if pane is None:
+            return
+        try:
+            await pane.async_activate(select_tab=True, order_window_front=False)
+        except Exception as e:
+            log.debug("reveal failed: %s", e)
+
     async def split(self, pane, vertical: bool):
         """Split a pane; returns the new pane or None."""
         if pane is None:
