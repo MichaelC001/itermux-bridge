@@ -54,8 +54,22 @@ class SizeFitter:
             self._held = {}
         return self._held
 
+    def _layouts(self) -> Dict[str, dict]:
+        """tab_id -> {session_id: (cols, rows)}: its last untouched layout."""
+        if not hasattr(self, "_layout_snap"):
+            self._layout_snap = {}
+        return self._layout_snap
+
     def _maybe_fit(self, peer, pane) -> None:
         """Refit when what the client shows changes. Called every poll.
+
+        Only a view of ONE pane is fitted: pane mode, or a zoomed pane (or a
+        tab with a single pane) in window mode. Fitting a whole split tab meant
+        resizing every pane one at a time, which with nested splits never
+        converged — each attempt left the dividers part-moved, and every
+        zoom/unzoom moved them further (measured: one cell per cycle, some
+        panes shrinking to 4 rows). A multi-pane view is left alone and drawn
+        scaled, as before; switching to one gives the window back.
 
         No RPC here: the key is built from the tab object iTerm2 keeps current
         and the client's size, so a steady view costs nothing.
@@ -63,6 +77,17 @@ class SizeFitter:
         tab = self.api.tab_of(pane.session_id)
         if tab is None or peer.tty is None:
             return
+        window = self.api.window_of(tab)
+        # Remember the layout while it is still iTerm2's own: once a pane is
+        # zoomed, the hidden panes report no size at all, so this is the only
+        # way to put the split back exactly afterwards.
+        if (window is not None and not self.api.is_zoomed(tab)
+                and window.window_id not in self._held_windows()
+                and window.window_id not in self._restoring()):
+            self._layouts()[tab.tab_id] = {
+                s.session_id: (s.grid_size.width, s.grid_size.height)
+                for s in tab.sessions}
+
         cols, rows = peer.tty.size()
         # In window mode moving between panes of one tab (Ctrl-B o) changes the
         # pane but not the layout, so key on the tab there.
@@ -76,6 +101,10 @@ class SizeFitter:
         # produces a burst of them.
         if peer.fit_task is not None:
             peer.fit_task.cancel()
+            peer.fit_task = None
+        if peer.window_mode and len(tab.sessions) > 1:
+            self._release_window(peer)      # whole split in view: hands off
+            return
         peer.fit_task = self._spawn(
             self._fit(peer, pane, tab, cols, rows), "fit")
 
@@ -88,6 +117,11 @@ class SizeFitter:
         if await self._client_inside(peer, window):
             return
 
+        # iTerm2 won't resize a fullscreen window; don't hold (and later
+        # "restore") one we can't have changed.
+        if await self.api.is_fullscreen(window):
+            return
+
         held = self._held_windows().get(window.window_id)
         if held is None:
             frame = await self.api.frame(window)
@@ -96,9 +130,9 @@ class SizeFitter:
             held = _Held(frame, set(), {})
             self._held_windows()[window.window_id] = held
         if tab.tab_id not in held.grids:
-            held.grids[tab.tab_id] = {
-                s.session_id: (s.grid_size.width, s.grid_size.height)
-                for s in tab.sessions}
+            snap = self._layouts().get(tab.tab_id)
+            if snap is not None:
+                held.grids[tab.tab_id] = dict(snap)
         if peer.fit_window != window.window_id:
             # Moved here from another window. Not _release_fit(): that cancels
             # peer.fit_task, which is this very coroutine.
@@ -111,8 +145,8 @@ class SizeFitter:
         if await self.api.set_grid_sizes(sizes):
             log.info("fit %d pane(s) to client %dx%d", len(sizes), cols, rows)
         else:
-            log.info("could not fit panes to %dx%d (fullscreen window?); "
-                     "rows will be cropped", cols, rows)
+            log.info("could not fit pane to %dx%d; rows will be cropped",
+                     cols, rows)
 
     async def _client_inside(self, peer, window) -> bool:
         if not peer.ttyname:
@@ -146,9 +180,22 @@ class SizeFitter:
         del self._held_windows()[wid]
         self._spawn(self._restore(wid, held), "restore window size")
 
+    def _restoring(self) -> set:
+        if not hasattr(self, "_restoring_ids"):
+            self._restoring_ids = set()
+        return self._restoring_ids
+
     async def _restore(self, wid: str, held: _Held) -> None:
-        # Pane sizes first — that puts the dividers back — then the frame,
-        # which also puts the window back where it was on screen.
-        for sizes in held.grids.values():
-            await self.api.set_grid_sizes(sizes)
-        await self.api.set_frame(wid, held.frame)
+        # Frame, then layout, then frame again. Measured on iTerm2: ending on
+        # the layout call leaves the window a row short; ending on the frame
+        # comes back exact, dividers and position included. The layout call
+        # sets every pane at once (preferred_size + update_layout) — per-pane
+        # set_grid_size can't converge on a nested split.
+        self._restoring().add(wid)
+        try:
+            await self.api.set_frame(wid, held.frame)
+            for tab_id, sizes in held.grids.items():
+                await self.api.set_layout(tab_id, sizes)
+            await self.api.set_frame(wid, held.frame)
+        finally:
+            self._restoring().discard(wid)

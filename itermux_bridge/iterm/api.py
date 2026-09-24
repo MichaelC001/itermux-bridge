@@ -303,6 +303,33 @@ class ITermAPI:
         except Exception as e:
             log.warning("restore window frame failed: %s", e)
 
+    async def is_fullscreen(self, window) -> bool:
+        try:
+            return bool(await window.async_get_fullscreen())
+        except Exception as e:
+            log.debug("fullscreen query failed: %s", e)
+            return False
+
+    async def set_layout(self, tab_id: str, sizes) -> None:
+        """Lay a whole split tab out at {session_id: (cols, rows)} in one go.
+
+        preferred_size on every pane, committed with one async_update_layout:
+        iTerm2 solves the whole tree at once. Setting panes one at a time
+        (set_grid_size) can't converge on a nested split — each call moves the
+        window under the others.
+        """
+        tab = next((t for w in self.windows() for t in w.tabs
+                    if t.tab_id == tab_id), None)
+        if tab is None:
+            return
+        try:
+            for s in tab.sessions:
+                if s.session_id in sizes:
+                    s.preferred_size = iterm2.util.Size(*sizes[s.session_id])
+            await tab.async_update_layout()
+        except Exception as e:
+            log.warning("restore layout failed: %s", e)
+
     async def set_grid_sizes(self, sizes) -> bool:
         """Resize panes to {session_id: (cols, rows)}. True if they all got it.
 

@@ -73,8 +73,12 @@ class Peer:
 class Tab:
     def __init__(self, tab_id, sessions):
         self.tab_id, self.sessions = tab_id, sessions
-        self.all_sessions = sessions
-        self.root = Split(True, sessions)
+        self.all_sessions = list(sessions)
+
+    @property
+    def root(self):
+        # Like iTerm2: a zoom collapses the split tree to the visible pane.
+        return Split(True, self.sessions)
 
 
 class Window:
@@ -85,10 +89,12 @@ class Window:
 class API:
     """Records what the fitter asked iTerm2 to do."""
 
-    def __init__(self, windows, ttys=None, fits=True):
+    def __init__(self, windows, ttys=None, fits=True, fullscreen=False):
         self.windows_ = windows
         self.ttys = ttys or {}           # session_id -> tty
         self.fits = fits
+        self.fullscreen = fullscreen
+        self.layouts = []
         self.grids, self.restored = [], []
         self.calls = []                  # order of grid/frame changes
 
@@ -116,6 +122,17 @@ class API:
 
     async def variable(self, s, name, default=None):
         return self.ttys.get(s.session_id, default)
+
+    def is_zoomed(self, tab):
+        return bool(getattr(tab, "zoomed", False))
+
+    async def is_fullscreen(self, window):
+        return self.fullscreen
+
+    async def set_layout(self, tab_id, sizes):
+        await asyncio.sleep(0)
+        self.layouts.append((tab_id, dict(sizes)))
+        self.calls.append(("layout", dict(sizes)))
 
 
 class Backend(SizeFitter):
@@ -151,13 +168,15 @@ check("client resize refits", be.api.grids[-1] == {"p": (60, 24)},
       f"({be.api.grids[-1]})")
 
 be._release_fit(peer); be.settle()
+# One restore sets the frame twice (before and after the layout).
 check("last client leaving restores the Mac window's original frame",
-      be.api.restored == [("w1", "frame-of-w1")], f"({be.api.restored})")
-# The frame alone rescales a split proportionally and leaves the divider
-# moved; the pane sizes from before the fit have to go back first.
-check("...after putting the panes' own sizes back",
-      be.api.calls[-2:] == [("grid", {"p": (100, 40)}), "frame"],
-      f"({be.api.calls[-2:]})")
+      be.api.restored == [("w1", "frame-of-w1")] * 2, f"({be.api.restored})")
+# The frame alone rescales a split proportionally and leaves dividers moved.
+# Frame, then the whole layout, then the frame again: measured on iTerm2,
+# ending on the layout call leaves the window a row short.
+check("...frame, original layout, frame -- in that order",
+      be.api.calls[-3:] == ["frame", ("layout", {"p": (100, 40)}), "frame"],
+      f"({be.api.calls[-3:]})")
 
 # Two clients on one window: the first to leave must NOT restore it under the
 # one still attached; that one refits to its own size instead.
@@ -172,7 +191,7 @@ be._maybe_fit(p1, pane); be.settle()
 check("...and the remaining client refits to its own size",
       be.api.grids[-1] == {"p": (80, 24)}, f"({be.api.grids[-1]})")
 be._release_fit(p1); be.settle()
-check("...restored once both are gone", len(be.api.restored) == 1)
+check("...restored once both are gone", len(be.api.restored) == 2)
 
 # A client running inside the same iTerm2 window would be resized by the fit,
 # report a new size, and refit forever. Leave that window alone.
@@ -199,10 +218,55 @@ peer = Peer(80, 24)
 be._maybe_fit(peer, a); be.settle()
 be._maybe_fit(peer, b); be.settle()
 check("switching windows restores the one we left",
-      api.restored == [("w1", "frame-of-w1")], f"({api.restored})")
+      api.restored and {w for w, _f in api.restored} == {"w1"},
+      f"({api.restored})")
 # The old window's restore and the new window's fit run concurrently and touch
 # different windows, so check the fit happened, not that it came last.
 check("...and fits the new one", {"b": (80, 24)} in api.grids, f"({api.grids})")
+
+print("\n=== window mode: only a single-pane view is fitted ===")
+
+# The regression: every zoom/unzoom cycle refitted the whole split, pane by
+# pane, from its CURRENT proportions -- one cell of drift per cycle, and
+# nested splits never converged at all. Now a multi-pane view is left alone,
+# a zoom fits the one visible pane, and unzoom restores the layout captured
+# before the zoom.
+a, b, c = Sess("a", 60, 20), Sess("b", 120, 20), Sess("c", 180, 19)
+tab = Tab("t1", [a, b, c])
+api = API([Window("w1", [tab])])
+be = Backend(api)
+peer = Peer(100, 30)
+peer.window_mode = True
+be._maybe_fit(peer, a); be.settle()
+check("whole split tab in view: panes are not resized", api.grids == [])
+original = {"a": (60, 20), "b": (120, 20), "c": (180, 19)}
+
+restores = []
+for cycle in range(5):
+    tab.sessions, tab.zoomed = [a], True          # Ctrl-B z: zoomed on a
+    be._maybe_fit(peer, a); be.settle()
+    fitted = api.grids[-1] if api.grids else None
+    a.grid_size = Grid(100, 29)                    # the fit took effect
+    tab.sessions, tab.zoomed = [a, b, c], False    # Ctrl-B z again
+    be._maybe_fit(peer, a); be.settle()
+    restores.append(api.layouts[-1][1] if api.layouts else None)
+    a.grid_size = Grid(60, 20)                     # the restore took effect
+check("zoom fits the one visible pane (title row off the height)",
+      fitted == {"a": (100, 29)}, f"({fitted})")
+check("unzoom restores the layout from before the zoom",
+      restores[0] == original, f"({restores[0]})")
+check("five zoom cycles restore the identical layout every time (no drift)",
+      restores == [original] * 5, f"({restores})")
+
+# A fullscreen window can't be resized; holding it would only "restore" (and
+# set the frame of) a window we never changed.
+be, pane = rig(fullscreen=True)
+peer = Peer(80, 24)
+be._maybe_fit(peer, pane); be.settle()
+be._release_fit(peer); be.settle()
+check("fullscreen window: no fit, nothing restored",
+      be.api.grids == [] and be.api.restored == [], f"({be.api.calls})")
+
 
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)
