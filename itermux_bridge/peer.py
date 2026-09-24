@@ -83,6 +83,11 @@ class Peer:
         self.fit_key = None
         self.fit_task = None
         self.fit_window: Optional[str] = None
+        #: The last frame written to this client and the conditions it was
+        #: drawn under, so the next paint sends only changed rows (view._emit).
+        self.last_frame = None
+        self.frame_size = None
+        self.frame_copy = False
 
     @property
     def mouse_owned(self) -> bool:

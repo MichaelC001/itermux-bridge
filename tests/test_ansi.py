@@ -304,5 +304,69 @@ row2 = out.split(b"\x1b[2;1H")[1]
 check("SGR is reset before erasing each row (no bg bleed onto the next line)",
       row2.startswith(ansi.RESET_SGR), f"({row2[:12]!r})")
 
+print("\n=== row diff: send only the rows that changed ===")
+
+a = ansi.render(Contents([Line("one"), Line("two"), Line("three")], cy=2), 30, 5)
+check("a frame is still bytes", isinstance(a, bytes))
+check("head + rows + tail reassemble the frame exactly",
+      a.head + b"".join(a.rows) + a.tail == bytes(a))
+check("one segment per client row", len(a.rows) == 5)
+check("no previous frame: everything is sent", ansi.diff(None, a) == bytes(a))
+
+same = ansi.diff(a, ansi.render(Contents([Line("one"), Line("two"),
+                                          Line("three")], cy=2), 30, 5))
+check("unchanged screen: no row is re-sent",
+      b"one" not in same and b"two" not in same and b"three" not in same)
+check("...but the tail (cursor, end of sync) still goes",
+      same.endswith(ansi.END_SYNC) and b"\033[3;1H" in same)
+
+b = ansi.render(Contents([Line("one"), Line("TWO!"), Line("three")], cy=2), 30, 5)
+d = ansi.diff(a, b)
+check("one changed line: only that row is sent",
+      b"TWO!" in d and b"one" not in d and b"three" not in d, f"({len(d)} bytes)")
+check("...a fraction of the full frame", len(d) < len(b) / 2,
+      f"({len(d)} of {len(b)} bytes)")
+
+# view._emit: the conditions under which a full frame is forced.
+from itermux_bridge.view import ScreenView  # noqa: E402
+from itermux_bridge.copymode import CopyMode  # noqa: E402
+
+
+class _EmitPeer:
+    def __init__(self):
+        self.copy = CopyMode()
+        self.last_frame = self.frame_size = None
+        self.frame_copy = False
+        self.cols, self.written = 30, []
+        me = self
+
+        class T:
+            def size(self):
+                return me.cols, 5
+        self.tty = T()
+
+    def write_out(self, data):
+        self.written.append(bytes(data))
+
+
+v, ep = ScreenView(), _EmitPeer()
+v._emit(ep, a)
+v._emit(ep, b)
+check("_emit sends the diff once it has a previous frame",
+      ep.written[-1] == ansi.diff(a, b))
+ep.cols = 40
+v._emit(ep, b)
+check("client resized: full frame", ep.written[-1] == bytes(b))
+ep.copy.enter(5)
+v._emit(ep, b)
+check("copy-mode entered: full frame", ep.written[-1] == bytes(b))
+ep.copy.leave()
+v._emit(ep, b)
+# render() drew copy-mode's status bar in the tail, over the last row; a diff
+# would leave it stranded there (caught against a real terminal emulator).
+check("copy-mode left: full frame, so its status bar is erased",
+      ep.written[-1] == bytes(b))
+
+
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)

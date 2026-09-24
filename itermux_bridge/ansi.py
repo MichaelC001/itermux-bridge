@@ -70,6 +70,44 @@ def visible_lines(contents, cols: int, rows: int, scroll_offset: int = 0):
     return out
 
 
+class Frame(bytes):
+    """A rendered frame: the bytes to write, plus where each row starts.
+
+    Every row is self-contained — it positions the cursor, resets SGR and
+    erases the row before drawing — so one can be re-sent on its own. The screen
+    pump uses that to send only the rows that changed (`diff`), instead of the
+    whole screen each time: typing into a 200x56 Claude Code pane used to cost a
+    22KB frame per keystroke.
+
+    It is still `bytes`, so anything that just writes a frame keeps working.
+    """
+    head: bytes
+    rows: list
+    tail: bytes
+
+
+def _frame(out, starts, tail_start: int) -> Frame:
+    data = bytes(out)
+    f = Frame(data)
+    f.head = data[:starts[0] if starts else tail_start]
+    f.rows = [data[a:b] for a, b in zip(starts, starts[1:] + [tail_start])]
+    f.tail = data[tail_start:]
+    return f
+
+
+def diff(prev, frame: Frame) -> bytes:
+    """What to write to turn a screen showing `prev` into `frame`.
+
+    Only the rows whose bytes changed, then the frame's tail (cursor, copy-mode
+    status, end of sync) — which is always sent. `prev` None means the client's
+    screen is unknown, so everything goes.
+    """
+    if prev is None or len(prev.rows) != len(frame.rows):
+        return bytes(frame)
+    changed = [r for old, r in zip(prev.rows, frame.rows) if old != r]
+    return frame.head + b"".join(changed) + frame.tail
+
+
 def render(contents, cols: int, rows: int, scroll_offset: int = 0,
            copy=None) -> bytes:
     """Full-screen repaint of a ScreenContents as ANSI bytes.
@@ -109,7 +147,9 @@ def render(contents, cols: int, rows: int, scroll_offset: int = 0,
     # writing it, so stale content from a taller previous frame is overwritten
     # without the screen ever going blank.
     last_key: Optional[tuple] = None
+    starts = []
     for i in range(rows):
+        starts.append(len(out))
         out += CSI + b"%d;1H" % (i + 1)   # cursor to row start
         # Reset before erasing: \033[2K clears using the CURRENT background
         # colour, so a background still active from the previous line would
@@ -172,6 +212,7 @@ def render(contents, cols: int, rows: int, scroll_offset: int = 0,
         if col < cols:
             out += b" " * (cols - col)
 
+    tail_start = len(out)
     out += RESET_SGR
 
     if copy is not None and copy.active:
@@ -184,7 +225,7 @@ def render(contents, cols: int, rows: int, scroll_offset: int = 0,
         cx = min(max(copy.cx, 0), cols - 1)
         out += CSI + b"%d;%dH" % (cy + 1, cx + 1)
         out += SHOW_CURSOR + END_SYNC
-        return bytes(out)
+        return _frame(out, starts, tail_start)
 
     # Rebase the cursor. cursor_coord.y is an ABSOLUTE line number in the
     # session's whole history (we've seen y=705 on a 59-row grid), so it has to
@@ -203,14 +244,14 @@ def render(contents, cols: int, rows: int, scroll_offset: int = 0,
         # END_SYNC is mandatory on EVERY path — leaving the block open would
         # freeze the client's display until some later frame happened to close it.
         out += HIDE_CURSOR + END_SYNC
-        return bytes(out)
+        return _frame(out, starts, tail_start)
 
     # Reposition the cursor and make sure it's visible — but SHOW_CURSOR is a
     # no-op when it's already shown, so it doesn't cause the IME-drift toggle.
     out += CSI + b"%d;%dH" % (cy + 1, cx + 1)
     out += SHOW_CURSOR
     out += END_SYNC
-    return bytes(out)
+    return _frame(out, starts, tail_start)
 
 
 def render_panes(panes, cols: int, rows: int, active_id: str = "",
@@ -336,7 +377,9 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
     # being seen stepping across the rows.
     out += BEGIN_SYNC + RESET_SGR + HOME
     last = None
+    starts = []
     for y in range(rows):
+        starts.append(len(out))
         out += CSI + b"%d;1H" % (y + 1)
         out += RESET_SGR
         last = RESET_SGR
@@ -350,6 +393,7 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
                 last = sgr
             out += ch.encode("utf-8", "replace")
 
+    tail_start = len(out)
     out += RESET_SGR
     if cursor:
         out += CSI + b"%d;%dH" % (cursor[0] + 1, cursor[1] + 1)
@@ -359,7 +403,7 @@ def render_panes(panes, cols: int, rows: int, active_id: str = "",
         # at a stale spot.
         out += HIDE_CURSOR
     out += END_SYNC
-    return bytes(out)
+    return _frame(out, starts, tail_start)
 
 
 def _draw_pane_title(grid, region, cols: int, name: str, active: bool) -> None:

@@ -256,7 +256,7 @@ class ScreenView:
         if not panes:
             return False
 
-        peer.write_out(ansi.render_panes(
+        self._emit(peer, ansi.render_panes(
             panes, cols, rows, active_id=session.session_id, copy=peer.copy,
             titles=titles))
         return True
@@ -300,7 +300,8 @@ class ScreenView:
             # can't serve a scrolled-back view. Ask for an explicit line range.
             scrolled = await self.api.history(session, rows, peer.scroll_offset)
             if scrolled is not None:
-                peer.write_out(ansi.render(scrolled, cols, rows, copy=peer.copy))
+                self._emit(peer, ansi.render(scrolled, cols, rows,
+                                             copy=peer.copy))
                 return
             # History unavailable — fall through and show the live screen.
             peer.scroll_offset = 0
@@ -310,7 +311,30 @@ class ScreenView:
         if contents is None:
             # Fetch failed; skip this frame; the pump repaints on the next poll.
             return
-        peer.write_out(ansi.render(contents, cols, rows,
-                                   scroll_offset=peer.scroll_offset,
-                                   copy=peer.copy))
+        self._emit(peer, ansi.render(contents, cols, rows,
+                                     scroll_offset=peer.scroll_offset,
+                                     copy=peer.copy))
+
+    def _emit(self, peer, frame) -> None:
+        """Write `frame`, sending only the rows that changed since the last one.
+
+        Claude Code's spinner and status line change the screen almost every
+        poll, and each change used to re-send the whole screen: 22KB per frame,
+        ~440KB/s for a 200x56 pane — more than a remote link carries, so frames
+        queued up and every keystroke's echo waited behind them. A keystroke
+        now costs the one or two rows it touched.
+
+        The diff is against the last frame WRITTEN to this client, which is what
+        its screen will show once the buffer drains. Anything else that draws on
+        the client's screen sets `peer.last_frame = None` to force a full one.
+        """
+        size = peer.tty.size()
+        prev = peer.last_frame
+        # render() draws copy-mode's status line in the frame's tail, over the
+        # last row — entering or leaving copy-mode has to redraw that row.
+        if size != peer.frame_size or peer.copy.active != peer.frame_copy:
+            prev = None
+        peer.write_out(ansi.diff(prev, frame))
+        peer.last_frame = frame
+        peer.frame_size, peer.frame_copy = size, peer.copy.active
 

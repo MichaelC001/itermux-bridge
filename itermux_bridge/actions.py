@@ -27,6 +27,10 @@ class PrefixActions:
         session = self.api.pane(sid)
         if session is None:
             return
+        # Prefix actions can print on the client's screen (rename-window's
+        # hint, break-pane's refusal) and change what's shown wholesale, so the
+        # next paint must not assume the screen still matches the last frame.
+        peer.last_frame = None
 
         try:
             if action == "copy-mode":
