@@ -34,9 +34,16 @@ def target_sizes(window_mode: bool, root, pane_id: str, cols: int,
 
 
 class _Held(NamedTuple):
-    """An iTerm2 window we resized: its original frame and who is fitting it."""
+    """An iTerm2 window we resized, what to put back, and who is fitting it.
+
+    The frame alone isn't enough: fitting one pane of a split moves its
+    divider, and restoring the frame only rescales the split proportionally
+    (measured: a 46|93 split came back 69|69). So each fitted tab's pane sizes
+    are kept too.
+    """
     frame: object
     peers: set
+    grids: dict         # tab_id -> {session_id: (cols, rows)} before we fit
 
 
 class SizeFitter:
@@ -86,8 +93,12 @@ class SizeFitter:
             frame = await self.api.frame(window)
             if frame is None:
                 return          # without the original frame we can't undo it
-            held = _Held(frame, set())
+            held = _Held(frame, set(), {})
             self._held_windows()[window.window_id] = held
+        if tab.tab_id not in held.grids:
+            held.grids[tab.tab_id] = {
+                s.session_id: (s.grid_size.width, s.grid_size.height)
+                for s in tab.sessions}
         if peer.fit_window != window.window_id:
             # Moved here from another window. Not _release_fit(): that cancels
             # peer.fit_task, which is this very coroutine.
@@ -133,4 +144,11 @@ class SizeFitter:
                 other.fit_key = None
             return
         del self._held_windows()[wid]
-        self._spawn(self.api.set_frame(wid, held.frame), "restore window size")
+        self._spawn(self._restore(wid, held), "restore window size")
+
+    async def _restore(self, wid: str, held: _Held) -> None:
+        # Pane sizes first — that puts the dividers back — then the frame,
+        # which also puts the window back where it was on screen.
+        for sizes in held.grids.values():
+            await self.api.set_grid_sizes(sizes)
+        await self.api.set_frame(wid, held.frame)

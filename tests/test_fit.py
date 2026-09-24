@@ -90,6 +90,7 @@ class API:
         self.ttys = ttys or {}           # session_id -> tty
         self.fits = fits
         self.grids, self.restored = [], []
+        self.calls = []                  # order of grid/frame changes
 
     def tab_of(self, sid):
         return next((t for w in self.windows_ for t in w.tabs
@@ -103,12 +104,14 @@ class API:
 
     async def set_frame(self, wid, frame):
         self.restored.append((wid, frame))
+        self.calls.append("frame")
 
     async def set_grid_sizes(self, sizes):
         # Yield like the real RPC does: a cancellation (e.g. a fit cancelling
         # itself) is only delivered at a real suspension point.
         await asyncio.sleep(0)
         self.grids.append(dict(sizes))
+        self.calls.append(("grid", dict(sizes)))
         return self.fits
 
     async def variable(self, s, name, default=None):
@@ -150,6 +153,11 @@ check("client resize refits", be.api.grids[-1] == {"p": (60, 24)},
 be._release_fit(peer); be.settle()
 check("last client leaving restores the Mac window's original frame",
       be.api.restored == [("w1", "frame-of-w1")], f"({be.api.restored})")
+# The frame alone rescales a split proportionally and leaves the divider
+# moved; the pane sizes from before the fit have to go back first.
+check("...after putting the panes' own sizes back",
+      be.api.calls[-2:] == [("grid", {"p": (100, 40)}), "frame"],
+      f"({be.api.calls[-2:]})")
 
 # Two clients on one window: the first to leave must NOT restore it under the
 # one still attached; that one refits to its own size instead.
@@ -192,7 +200,9 @@ be._maybe_fit(peer, a); be.settle()
 be._maybe_fit(peer, b); be.settle()
 check("switching windows restores the one we left",
       api.restored == [("w1", "frame-of-w1")], f"({api.restored})")
-check("...and fits the new one", api.grids[-1] == {"b": (80, 24)})
+# The old window's restore and the new window's fit run concurrently and touch
+# different windows, so check the fit happened, not that it came last.
+check("...and fits the new one", {"b": (80, 24)} in api.grids, f"({api.grids})")
 
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)
