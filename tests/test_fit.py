@@ -268,5 +268,52 @@ check("fullscreen window: no fit, nothing restored",
       be.api.grids == [] and be.api.restored == [], f"({be.api.calls})")
 
 
+print("\n=== a remembered layout goes stale ===")
+
+import time as _time  # noqa: E402
+
+# What happened live: the layout was recorded during an earlier visit, the
+# user then re-arranged the tab while nobody was attached, and later attached
+# to it while it was ALREADY zoomed. Unzooming "restored" the old record,
+# undoing the user's re-arrangement.
+a, b = Sess("a", 60, 20), Sess("b", 120, 20)
+tab = Tab("t1", [a, b])
+api = API([Window("w1", [tab])])
+be = Backend(api)
+be._layouts()["t1"] = (_time.monotonic() - 3600, {"a": (10, 5), "b": (170, 35)})
+tab.sessions, tab.zoomed = [a], True           # attach lands on a zoomed tab
+peer = Peer(100, 30); peer.window_mode = True
+be._maybe_fit(peer, a); be.settle()
+tab.sessions, tab.zoomed = [a, b], False       # unzoom
+be._maybe_fit(peer, a); be.settle()
+check("stale record is never restored", api.layouts == [], f"({api.layouts})")
+check("...only the window frame is put back", api.restored != [])
+
+# The normal case still restores exactly: zoom while the client watches.
+a, b = Sess("a", 60, 20), Sess("b", 120, 20)
+tab = Tab("t1", [a, b])
+api = API([Window("w1", [tab])])
+be = Backend(api)
+peer = Peer(100, 30); peer.window_mode = True
+be._maybe_fit(peer, a); be.settle()           # watching it unzoomed: recorded
+tab.sessions, tab.zoomed = [a], True
+be._maybe_fit(peer, a); be.settle()
+tab.sessions, tab.zoomed = [a, b], False
+be._maybe_fit(peer, a); be.settle()
+check("zoom while watching: the layout from just before is restored",
+      api.layouts and api.layouts[-1][1] == {"a": (60, 20), "b": (120, 20)},
+      f"({api.layouts})")
+
+# A fit that can't be reached (a pane deep in a split can't grow the window
+# past the screen) has still moved things part-way: put it back right away,
+# not only when the client eventually leaves.
+be, pane = rig(fits=False)
+peer = Peer(80, 24)
+be._maybe_fit(peer, pane); be.settle()
+check("failed fit: layout restored immediately, client still attached",
+      be.api.restored != [] and peer.fit_window is None,
+      f"({be.api.restored}, fit_window={peer.fit_window})")
+
+
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)

@@ -13,11 +13,19 @@ uses `self.api`, `self._spawn` from there.
 """
 
 import logging
+import time
 from typing import Dict, NamedTuple, Tuple
 
 from . import layout
 
 log = logging.getLogger(__name__)
+
+#: How old a remembered layout may be and still be restored. The pump keeps it
+#: current only while a client is looking at the tab unzoomed; a zoom then
+#: triggers the fit within a poll or two. Anything older was taken during some
+#: earlier visit, and the layout may have been changed since by someone at the
+#: Mac: restoring it put a tab back to a layout the user had already replaced.
+SNAPSHOT_MAX_AGE = 2.0
 
 
 def target_sizes(window_mode: bool, root, pane_id: str, cols: int,
@@ -54,8 +62,8 @@ class SizeFitter:
             self._held = {}
         return self._held
 
-    def _layouts(self) -> Dict[str, dict]:
-        """tab_id -> {session_id: (cols, rows)}: its last untouched layout."""
+    def _layouts(self) -> Dict[str, tuple]:
+        """tab_id -> (taken_at, {session_id: (cols, rows)}): last seen layout."""
         if not hasattr(self, "_layout_snap"):
             self._layout_snap = {}
         return self._layout_snap
@@ -84,9 +92,9 @@ class SizeFitter:
         if (window is not None and not self.api.is_zoomed(tab)
                 and window.window_id not in self._held_windows()
                 and window.window_id not in self._restoring()):
-            self._layouts()[tab.tab_id] = {
+            self._layouts()[tab.tab_id] = (time.monotonic(), {
                 s.session_id: (s.grid_size.width, s.grid_size.height)
-                for s in tab.sessions}
+                for s in tab.sessions})
 
         cols, rows = peer.tty.size()
         # In window mode moving between panes of one tab (Ctrl-B o) changes the
@@ -130,9 +138,9 @@ class SizeFitter:
             held = _Held(frame, set(), {})
             self._held_windows()[window.window_id] = held
         if tab.tab_id not in held.grids:
-            snap = self._layouts().get(tab.tab_id)
-            if snap is not None:
-                held.grids[tab.tab_id] = dict(snap)
+            layout_now = self._layout_to_restore(tab)
+            if layout_now is not None:
+                held.grids[tab.tab_id] = layout_now
         if peer.fit_window != window.window_id:
             # Moved here from another window. Not _release_fit(): that cancels
             # peer.fit_task, which is this very coroutine.
@@ -144,9 +152,31 @@ class SizeFitter:
                              cols, rows)
         if await self.api.set_grid_sizes(sizes):
             log.info("fit %d pane(s) to client %dx%d", len(sizes), cols, rows)
-        else:
-            log.info("could not fit pane to %dx%d; rows will be cropped",
-                     cols, rows)
+            return
+        # Not reached (e.g. a pane deep in a split can't grow the window past
+        # the screen) -- but set_grid_size has still moved things part-way.
+        # Don't leave the user's layout half-moved until this client leaves:
+        # give it back now and fall back to cropping.
+        log.info("could not fit pane to %dx%d; restoring the layout, rows "
+                 "will be cropped", cols, rows)
+        self._release_window(peer)
+
+    def _layout_to_restore(self, tab):
+        """The split to put back when this fit ends, or None if unknown.
+
+        Unzoomed, the tab's current layout is right here. Zoomed, the hidden
+        panes report no size, so only a snapshot taken moments ago (the zoom
+        that triggered this fit) will do. Without one, restore just the
+        window frame: iTerm2 keeps its own record of the split across a zoom
+        and puts it back itself.
+        """
+        if not self.api.is_zoomed(tab):
+            return {s.session_id: (s.grid_size.width, s.grid_size.height)
+                    for s in tab.sessions}
+        snap = self._layouts().get(tab.tab_id)
+        if snap is None or time.monotonic() - snap[0] > SNAPSHOT_MAX_AGE:
+            return None
+        return dict(snap[1])
 
     async def _client_inside(self, peer, window) -> bool:
         if not peer.ttyname:
