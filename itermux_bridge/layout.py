@@ -30,30 +30,56 @@ def _is_leaf(node) -> bool:
     return not hasattr(node, "children")
 
 
-def _weight(node, vertical: bool) -> int:
+def _leaves(node):
+    if _is_leaf(node):
+        yield node
+        return
+    for c in node.children:
+        yield from _leaves(c)
+
+
+def _has_frame(leaf) -> bool:
+    f = getattr(leaf, "frame", None)
+    size = getattr(f, "size", None)
+    return size is not None and size.width > 0 and size.height > 0
+
+
+def _weight(node, vertical: bool, use_frames: bool = False) -> float:
     """A node's size along the axis its parent divides.
 
-    Uses real iTerm2 cell sizes so the composited layout keeps the proportions
-    the user set up. A splitter's extent is the max of its children across the
-    divider, and their sum along it.
+    Weighs by the pane's size ON SCREEN (its frame, in points) when every pane
+    has one, else by its cell count. Cells are the wrong measure when panes use
+    different fonts: an 11pt pane shows 14 rows in the height a 12pt pane shows
+    12, so weighing by rows drew four equally tall panes as 14/17/14/14.
+
+    A splitter's extent is the max of its children across the divider, and
+    their sum along it.
     """
     if _is_leaf(node):
+        if use_frames:
+            size = node.frame.size
+            return float(size.width if vertical else size.height)
         g = node.grid_size
-        return int(g.width) if vertical else int(g.height)
+        return float(g.width if vertical else g.height)
 
     same_axis = (node.vertical == vertical)
-    parts = [_weight(c, vertical) for c in node.children]
+    parts = [_weight(c, vertical, use_frames) for c in node.children]
     if not parts:
         return 1
     # Children laid out ALONG this axis add up; across it they overlap.
     return sum(parts) if same_axis else max(parts)
 
 
-def _split(total: int, weights: List[int], gaps: int) -> List[int]:
+def _split(total: int, weights: List[float], gaps: int) -> List[int]:
     """Divide `total` cells among weights, reserving `gaps` cells for dividers.
 
-    Every pane gets at least 1 row/col, and rounding leftovers go to the largest
-    pane so the regions always fill the space exactly.
+    Rounds the BOUNDARIES (cumulative positions), not each size on its own.
+    Rounding sizes independently misplaces dividers in two ways: leftover cells
+    all went to the largest pane (four equal panes drew 17/14/14/14), and in a
+    two-column layout each column's leftovers landed on different panes, so
+    dividers that are level on the Mac came out a row apart. Boundaries that
+    are level on screen round to the same row. Every pane still gets at least
+    1 cell and the regions fill the space exactly.
     """
     avail = total - gaps
     n = len(weights)
@@ -61,26 +87,33 @@ def _split(total: int, weights: List[int], gaps: int) -> List[int]:
         # Not enough room for everyone; give what we can.
         return [1] * n
 
-    tw = sum(weights) or n
-    sizes = [max(1, (avail * w) // tw) for w in weights]
+    tw = sum(weights)
+    if tw <= 0:
+        weights, tw = [1.0] * n, float(n)
+    cuts, acc = [], 0.0
+    for w in weights:
+        acc += w
+        cuts.append(int(avail * acc / tw + 0.5))
+    cuts[-1] = avail
+    sizes = [b - a for a, b in zip([0] + cuts[:-1], cuts)]
 
-    # Fix up rounding drift.
-    drift = avail - sum(sizes)
-    while drift > 0:
-        sizes[sizes.index(max(sizes))] += 1
-        drift -= 1
-    while drift < 0:
-        i = sizes.index(max(sizes))
-        if sizes[i] <= 1:
-            break
-        sizes[i] -= 1
-        drift += 1
+    # A sliver of a pane can round to 0; lend it a cell from the largest.
+    for i in range(n):
+        while sizes[i] < 1:
+            j = sizes.index(max(sizes))
+            if sizes[j] <= 1:
+                break
+            sizes[j] -= 1
+            sizes[i] += 1
     return sizes
 
 
 def regions(root, cols: int, rows: int) -> List[Region]:
     """Lay out every pane in a tab's split tree onto a cols x rows grid."""
     out: List[Region] = []
+    # Points only if EVERY pane has a frame: mixing points and cells in one
+    # split would compare numbers in different units.
+    use_frames = all(_has_frame(leaf) for leaf in _leaves(root))
 
     def place(node, x: int, y: int, w: int, h: int) -> None:
         if w <= 0 or h <= 0:
@@ -99,7 +132,7 @@ def regions(root, cols: int, rows: int) -> List[Region]:
 
         vertical = bool(node.vertical)
         gaps = len(kids) - 1        # one divider line between each pair
-        weights = [_weight(k, vertical) for k in kids]
+        weights = [_weight(k, vertical, use_frames) for k in kids]
 
         if vertical:
             # Children sit side by side; divide the WIDTH.

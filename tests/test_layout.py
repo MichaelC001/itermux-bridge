@@ -168,5 +168,54 @@ out = ansi.render_panes(panes, 80, 24, active_id="a", copy=CopyMode())
 check("no copy-mode chrome when the mode is off",
       b"COPY" not in out and ansi.SELECTION_SGR not in out)
 
+print("\n=== rounding and on-screen sizes ===")
+
+
+class Pt:
+    def __init__(self, w, h):
+        class S: pass
+        self.size = S(); self.size.width, self.size.height = w, h
+
+
+class FSess(Sess):
+    """A pane with an on-screen frame, like iTerm2's (points)."""
+    def __init__(self, sid, w, h, pw, ph):
+        super().__init__(sid, w, h)
+        self.frame = Pt(pw, ph)
+
+
+# Four EQUAL panes stacked in 62 rows: 59 after dividers, 14.75 each. The old
+# rounding gave all 3 spare rows to one pane: 17/14/14/14.
+col = Split(False, [Sess(c, 100, 12) for c in "abcd"])
+hs = [r.height for r in layout.regions(col, 100, 62)]
+check("equal panes stay within one row of each other", max(hs) - min(hs) <= 1,
+      f"({hs})")
+check("...and still fill the height exactly", sum(hs) + 3 == 62, f"({hs})")
+
+# The live case: one pane uses an 11pt font, so it shows 14 rows in the same
+# height the 12pt panes show 12. Equal on screen must draw equal.
+col = Split(False, [FSess("a", 85, 12, 600, 229), FSess("b", 85, 14, 600, 233),
+                    FSess("c", 85, 12, 600, 228), FSess("d", 85, 12, 600, 229)])
+hs = [r.height for r in layout.regions(col, 100, 62)]
+check("weighted by on-screen height, not row count",
+      max(hs) - min(hs) <= 1, f"({hs})")
+
+# Two columns of equal panes, one with the 11pt pane: dividers line up.
+left = Split(False, [FSess("a", 85, 12, 600, 229), FSess("b", 85, 14, 600, 233),
+                     FSess("c", 85, 12, 600, 228), FSess("d", 85, 12, 600, 229)])
+right = Split(False, [FSess(x, 112, 12, 790, 230) for x in "efgh"])
+regs = {r.session_id: r for r in layout.regions(Split(True, [left, right]), 200, 62)}
+ys_left = [regs[x].y for x in "abcd"]
+ys_right = [regs[x].y for x in "efgh"]
+check("the two columns' dividers line up", ys_left == ys_right,
+      f"(left {ys_left}, right {ys_right})")
+
+# A pane without a frame means cells for everyone: never mix units.
+col = Split(False, [FSess("a", 85, 12, 600, 229), Sess("b", 85, 36)])
+hs = [r.height for r in layout.regions(col, 100, 49)]
+check("any pane lacking a frame: fall back to row counts", hs[1] > 2 * hs[0],
+      f"({hs})")
+
+
 print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE") + "\n")
 sys.exit(0 if ok else 1)
