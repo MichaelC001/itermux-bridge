@@ -10,6 +10,7 @@ can disappear at any moment between us looking it up and acting on it, and every
 caller would otherwise need the same try/except.
 """
 
+import asyncio
 import logging
 from typing import Any, List, Optional, Tuple
 
@@ -365,11 +366,40 @@ class ITermAPI:
         if pane is None:
             return
         await self.activate(pane)
+        # The menu item acts on the KEY window's current pane, and activation
+        # isn't instantaneous. Firing before it lands toggles some other tab —
+        # seen live: a zoom meant for one window maximized a pane in another
+        # window entirely. Confirm first; refuse rather than hit the wrong tab.
+        if not await self._is_focused(pane):
+            log.warning("zoom skipped: pane %s never became the active pane "
+                        "of the key window", pane.session_id[:8])
+            return
         try:
             await iterm2.MainMenu.async_select_menu_item(
                 self.connection, MENU_MAXIMIZE)
         except Exception as e:
             log.warning("zoom failed: %s", e)
+
+    async def _is_focused(self, pane, timeout: float = 1.0) -> bool:
+        """Wait until `pane` is the current pane of the key window's tab."""
+        tab = self.tab_of(pane.session_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            try:
+                await self.app.async_refresh_focus()
+            except Exception as e:
+                log.debug("refresh focus failed: %s", e)
+            w = self.app.current_terminal_window
+            cur = w.current_tab if w is not None else None
+            if (cur is not None and tab is not None
+                    and cur.tab_id == tab.tab_id
+                    and cur.current_session is not None
+                    and cur.current_session.session_id == pane.session_id):
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
 
     async def neighbour(self, tab, pane, direction: str):
         """The pane in `direction` ('left'/'right'/'above'/'below'), or None."""
